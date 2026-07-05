@@ -1,0 +1,12 @@
+experiment_name,category,word_combo,directory_key,box_folder_id,box_url,created_date,created_by_slack_user,associated_with,original_name
+2025-06-03-bph-boldly-stop,bph,boldly-stop,scans,214748364801,https://app.box.com/folder/214748364801,2025-06-03,backfill,,
+2025-06-28-bph-clearly-rotate,bph,clearly-rotate,scans,214748364802,https://app.box.com/folder/214748364802,2025-06-28,backfill,,
+2025-10-08-bph-coolly-cut,bph,coolly-cut,scans,214748364803,https://app.box.com/folder/214748364803,2025-10-08,backfill,,
+2025-10-09-bph-coolly-measure,bph,coolly-measure,scans,214748364804,https://app.box.com/folder/214748364804,2025-10-09,backfill,,
+2026-05-05-bph-aptly-align,bph,aptly-align,experiments,214748364805,https://app.box.com/folder/214748364805,2026-05-05,backfill,,
+2026-05-22-bph-brightly-capture,bph,brightly-capture,experiments,214748364806,https://app.box.com/folder/214748364806,2026-05-22,backfill,,
+2026-06-01-bph-brightly-run,bph,brightly-run,experiments,214748364807,https://app.box.com/folder/214748364807,2026-06-01,backfill,,
+2026-06-17-bph-woolly-canvas,bph,woolly-canvas,scans,214748364811,https://app.box.com/folder/214748364811,2026-06-17,iven.chen,,2026-06-17 - FLR: CT
+2026-07-05-bph-decorous-harbor,bph,decorous-harbor,scans,214748364808,https://app.box.com/folder/214748364808,2026-07-05,iven.chen,2025-10-08-bph-coolly-cut,
+2026-07-05-cao-resident-gazelle,cao,resident-gazelle,experiments,214748364809,https://app.box.com/folder/214748364809,2026-07-05,iven.chen,,
+2026-07-05-cao-flying-update,cao,flying-update,scans,214748364810,https://app.box.com/folder/214748364810,2026-07-05,jane.doe,https://app.box.com/folder/214748360000,
