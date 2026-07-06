@@ -196,32 +196,45 @@ def add_back_references(experiment: dict, associations: list[dict]) -> None:
             )
 
 
-def remove_back_references(experiment: dict, associations: list[dict]) -> None:
-    """Undo add_back_references: drop the back-reference to `experiment` from
-    each associated folder's description. Called before deleting an
-    experiment so the other side isn't left with a dangling link.
+def purge_references(deleted_ids) -> None:
+    """Strip any association pointing at a deleted folder from EVERY other
+    experiment folder's description (both directories).
 
-    `experiment` is a find/list dict (name + url + id)."""
-    back_id = _folder_id_from_url(experiment.get("url"))
-    if not back_id:
+    Called after deleting experiment(s) so nothing is left pointing at a
+    now-deleted folder. Unlike a targeted back-reference removal, this crawls
+    all folders and doesn't rely on the deleted folder's own association list
+    being symmetric — so it also fixes legacy/one-directional links. Best
+    effort per folder; pass all ids from a `delete empty` prune at once so the
+    crawl happens a single time.
+    """
+    deleted_ids = {i for i in deleted_ids if i}
+    if not deleted_ids:
         return
-    for a in associations:
-        folder_id = _folder_id_from_url(a.get("url"))
-        if not folder_id or folder_id == back_id:
-            continue
+    try:
+        folders = box_client.list_experiment_folders()
+    except Exception:
+        logging.warning("could not list folders to purge references", exc_info=True)
+        return
+    for folder in folders:
+        if folder["id"] in deleted_ids:
+            continue  # itself deleted
         try:
-            existing = box_client.get_folder_description(folder_id)
+            existing = box_client.get_folder_description(folder["id"])
             current = parse_associations(existing)
-            kept = [c for c in current if _folder_id_from_url(c.get("url")) != back_id]
+            kept = [
+                a
+                for a in current
+                if _folder_id_from_url(a.get("url")) not in deleted_ids
+            ]
             if len(kept) == len(current):
-                continue  # nothing pointed back at us
+                continue  # nothing pointed at a deleted folder
             box_client.set_folder_description(
-                folder_id, set_associations_in_description(existing, kept)
+                folder["id"], set_associations_in_description(existing, kept)
             )
         except Exception:
             logging.warning(
-                "could not remove back-reference from folder %s",
-                folder_id,
+                "could not purge references from folder %s",
+                folder["id"],
                 exc_info=True,
             )
 

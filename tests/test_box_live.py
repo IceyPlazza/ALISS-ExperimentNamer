@@ -14,16 +14,18 @@ skip with a clear message rather than erroring. Generate a fresh token and
 re-run.
 """
 
+import os
+
 import pytest
 from dotenv import load_dotenv
 
 from core.box import box_client
-from core.box.box_client import BOX_DIRECTORIES, BoxNotConfiguredError
+from core.box.box_client import BOX_DIRECTORIES
 from core.slack.experiments import (
     add_back_references,
     associations_to_description,
     parse_associations,
-    remove_back_references,
+    purge_references,
 )
 from core.slack.naming import generate_experiment_name
 
@@ -34,16 +36,37 @@ pytestmark = pytest.mark.box_live
 TEST_SUFFIX = "-pytesttmp"
 
 
+def _missing_box_config():
+    """Human-readable reason BOX_* isn't configured enough to connect, or
+    None if it is. Keeps the skip reason crisp and independent of the SDK, so
+    on a machine with no .env (e.g. public CI) these tests skip cleanly rather
+    than failing."""
+    load_dotenv()
+    method = os.environ.get("BOX_AUTH_METHOD", "").strip().lower()
+    if method == "dev_token":
+        if not os.environ.get("BOX_DEVELOPER_TOKEN", "").strip():
+            return "BOX_DEVELOPER_TOKEN is not set"
+        return None
+    if method == "ccg":
+        missing = [
+            k
+            for k in ("BOX_CLIENT_ID", "BOX_CLIENT_SECRET", "BOX_ENTERPRISE_ID")
+            if not os.environ.get(k, "").strip()
+        ]
+        return f"missing {', '.join(missing)}" if missing else None
+    return "BOX_AUTH_METHOD is not set to 'dev_token' or 'ccg'"
+
+
 @pytest.fixture(scope="module")
 def box():
-    """Load .env and confirm we can reach Box; skip (don't fail) if the
-    token is missing/expired so `--run-box-live` degrades gracefully."""
-    load_dotenv()
+    """Confirm Box is configured AND reachable; skip (don't fail) otherwise so
+    `--run-box-live` degrades gracefully when there's no .env or the dev token
+    has expired."""
+    reason = _missing_box_config()
+    if reason:
+        pytest.skip(f"Box not configured ({reason}) - set BOX_* in .env for live tests")
     try:
-        client = box_client.get_client()
-        client.users.get_user_me()  # forces a real authenticated round-trip
-    except BoxNotConfiguredError as e:
-        pytest.skip(f"Box not configured: {e}")
+        box_client.get_client().users.get_user_me()  # real authed round-trip
     except Exception as e:  # expired dev token, network, permissions…
         pytest.skip(f"Box not reachable (expired token?): {e}")
     return box_client
@@ -163,8 +186,9 @@ def test_bidirectional_association_round_trip(box):
         y_assocs = parse_associations(box.get_folder_description(y["id"]))
         assert any(a["label"] == x_name for a in y_assocs)
 
-        # removing it (delete cleanup) strips the back-reference from Y
-        remove_back_references(x, associations)
+        # deleting X (simulated via purge) strips the reference from Y, even
+        # though we don't rely on X's own association list
+        purge_references({x["id"]})
         assert not parse_associations(box.get_folder_description(y["id"]))
     finally:
         box.delete_experiment_folder(x["id"])

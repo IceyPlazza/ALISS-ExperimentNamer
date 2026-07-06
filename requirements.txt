@@ -1,3 +1,4 @@
 slack-bolt>=1.29.0
 unique-namer>=1.6.2
 python-dotenv>=1.0.0
+box-sdk-gen>=1.17.0

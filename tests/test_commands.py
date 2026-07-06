@@ -240,10 +240,11 @@ def test_cmd_delete_empty_keyword_prunes_and_announces(monkeypatch, respond, say
     assert "empty-one" in say.kwargs["blocks"][0]["text"]["text"]
 
 
-def test_cmd_delete_removes_back_references(monkeypatch, respond, say):
-    # X (folder 1) is associated with Y (folder 5); Y points back at X.
+def test_cmd_delete_purges_references(monkeypatch, respond, say):
+    # X (folder 1) is deleted; Y (folder 5) still points at it — even though X
+    # has no back-reference to Y (asymmetric), the purge crawl cleans Y.
     store = {
-        "1": "Associated experiments:\n- 2026-01-01-cao-y | https://app.box.com/folder/5",
+        "1": "",  # X has no association to Y — the reported asymmetric case
         "5": "Associated experiments:\n- 2026-07-05-bph-x | https://app.box.com/folder/1",
     }
     monkeypatch.setattr(
@@ -258,10 +259,12 @@ def test_cmd_delete_removes_back_references(monkeypatch, respond, say):
     )
     monkeypatch.setattr(box_client, "folder_has_files", lambda fid: False)
     monkeypatch.setattr(box_client, "delete_experiment_folder", lambda fid: store.pop(fid, None))
+    # after delete, the crawl sees the remaining folder(s)
+    monkeypatch.setattr(box_client, "list_experiment_folders", lambda: [{"id": "5"}])
     monkeypatch.setattr(box_client, "get_folder_description", lambda fid: store.get(fid, ""))
     monkeypatch.setattr(box_client, "set_folder_description", store.__setitem__)
     cmd_delete(respond, "2026-07-05-bph-x", say=say, body={"user_id": "U1"})
-    # Y no longer links to the deleted X
+    # Y no longer links to the deleted X, despite the missing back-reference
     assert "folder/1" not in store["5"]
     assert "deleted" in say.text.lower()
 

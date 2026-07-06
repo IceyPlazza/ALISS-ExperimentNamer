@@ -21,7 +21,7 @@ from core.slack.experiments import (
     parse_associations,
     post_delete,
     post_prune,
-    remove_back_references,
+    purge_references,
 )
 from core.slack.views import (
     BOX_NOT_READY,
@@ -166,11 +166,9 @@ def cmd_delete(respond, arg, say=None, body=None, **_):
             f"not deleting. Review it first: <{folder['url']}|open in Box>"
         )
         return
-    # Read the associations off the folder before deleting so we can strip
-    # the matching back-references from the other side.
-    associations = _read_associations(folder["id"])
     box_client.delete_experiment_folder(folder["id"])
-    remove_back_references(folder, associations)
+    # Strip any association pointing at this now-deleted folder (both dirs).
+    purge_references({folder["id"]})
     post_delete(say, body["user_id"], folder)
 
 
@@ -182,9 +180,7 @@ def prune_empty_experiments(respond, say=None, body=None):
         deleted = []
         for folder in folders:
             if not box_client.folder_has_files(folder["id"]):
-                associations = _read_associations(folder["id"])
                 box_client.delete_experiment_folder(folder["id"])
-                remove_back_references(folder, associations)
                 deleted.append(folder)
     except BoxNotConfiguredError:
         respond(text=BOX_NOT_READY)
@@ -192,6 +188,8 @@ def prune_empty_experiments(respond, say=None, body=None):
     if not deleted:
         respond(text=":broom: No empty experiments found — nothing to prune.")
         return
+    # One crawl strips references to every folder we just pruned.
+    purge_references({f["id"] for f in deleted})
     post_prune(say, body["user_id"], deleted)
 
 

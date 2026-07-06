@@ -17,7 +17,7 @@ from core.slack.experiments import (
     post_delete,
     post_legacy_rename,
     post_prune,
-    remove_back_references,
+    purge_references,
     resolve_association,
     set_associations_in_description,
 )
@@ -257,25 +257,51 @@ def test_add_back_references_skips_self(monkeypatch):
     assert store.get("1") == ""  # never references itself
 
 
-def test_remove_back_references(monkeypatch):
+def test_purge_references_strips_pointers_to_deleted(monkeypatch):
+    # Folder 1 (deleted) is referenced by 5 and 9; 9 also refs an unrelated 7.
     store = FakeStore(
         {
             "5": "Associated experiments:\n- 2026-07-05-bph-x | https://app.box.com/folder/1",
             "9": "Notes.\n\nAssociated experiments:\n- 2026-07-05-bph-x | https://app.box.com/folder/1\n- other | https://app.box.com/folder/7",
         }
     ).install(monkeypatch)
-    x = {"name": "2026-07-05-bph-x", "url": "https://app.box.com/folder/1"}
-    associations = [
-        {"label": "y", "url": "https://app.box.com/folder/5"},
-        {"label": "z", "url": "https://app.box.com/folder/9"},
-    ]
-    remove_back_references(x, associations)
-    # x removed from both; unrelated entry + human text on 9 preserved
+    monkeypatch.setattr(
+        box_client,
+        "list_experiment_folders",
+        lambda: [{"id": "5"}, {"id": "9"}],
+    )
+    purge_references({"1"})
+    # pointer to deleted folder 1 removed everywhere…
     assert parse_associations(store.get("5")) == []
+    # …unrelated entry + human text on 9 preserved
     assert store.get("9").startswith("Notes.")
     assert parse_associations(store.get("9")) == [
         {"label": "other", "url": "https://app.box.com/folder/7"}
     ]
+
+
+def test_purge_references_fixes_asymmetric_link(monkeypatch):
+    # The parent (folder 2) points at the child (folder 1), but the child has
+    # no back-reference — purge still cleans the parent (the reported bug).
+    store = FakeStore(
+        {
+            "2": "Associated experiments:\n- child | https://app.box.com/folder/1",
+        }
+    ).install(monkeypatch)
+    monkeypatch.setattr(
+        box_client, "list_experiment_folders", lambda: [{"id": "2"}]
+    )
+    purge_references({"1"})
+    assert parse_associations(store.get("2")) == []
+
+
+def test_purge_references_noop_when_nothing_deleted(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        box_client, "list_experiment_folders", lambda: calls.append("crawl") or []
+    )
+    purge_references(set())
+    assert calls == []  # no crawl when there's nothing to purge
 
 
 # --------------------------------------------------------------------------

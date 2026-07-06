@@ -28,5 +28,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # Plain `pytest` runs the hermetic unit tests only. Live Slack/Box is
+      # never exercised here: there are no Slack secrets in CI, and the live
+      # Box tests are opt-in (`--run-box-live`) and self-skip without BOX_*
+      # creds. Do NOT add `--run-box-live` — this is a public repo with no
+      # committed .env / secrets.
       - name: Run tests
         run: pytest

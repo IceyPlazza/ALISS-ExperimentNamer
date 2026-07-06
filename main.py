@@ -1,4 +1,4 @@
-"""ExperimentNamer Slack App.
+"""ExperimentNamer Slack App — entry point.
 
 Generates unique experiment names in the format:
     YYYY-MM-DD-{category}-word-word
@@ -6,113 +6,48 @@ Generates unique experiment names in the format:
 The two-word combo comes from the `unique-namer` package
 (https://github.com/aziele/unique-namer).
 
-Flow:
-    1. A user runs /experiment in any channel the bot is in.
-    2. The bot replies (ephemerally) asking them to pick a category.
-    3. On click, the bot generates the name and posts it to the channel.
+Subcommands (see CLAUDE.md for the full spec):
+    /experiment new                — pick a category, generate a new name
+    /experiment track <name>       — find the experiment's Box folder + link
+    /experiment date <YYYY-MM-DD>  — list experiments generated on a date
+    /experiment delete <name>      — delete an experiment (only if empty)
+    /experiment category <code>    — list experiments for bph or cao
+    /experiment legacy [box-link]  — rename a legacy folder to the scheme
+
+The app is assembled from the modules under `core/slack`:
+    naming       — name generation, detection, validation (pure helpers)
+    views        — Block Kit builders and user-facing message strings
+    experiments  — association / legacy-conversion / create-announce logic
+    commands     — the /experiment subcommand handlers + dispatch table
+    handlers     — Bolt wiring (register(app))
+
+Box-backed subcommands are wired through core.box.box_client, which degrades
+to a "not connected yet" notice until the BOX_* variables are set.
 
 Runs over Socket Mode, so no public URL is required.
 """
 
 import logging
 import os
-import re
-from datetime import date
 
-import namer
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+from core.slack.handlers import register
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
-# Experiment categories offered by the /experiment picker. The code goes
-# directly into the generated name: YYYY-MM-DD-{code}-word-word.
-EXPERIMENT_CATEGORIES = ["bph", "cao"]
+# SLACK_TOKEN_VERIFY=0 skips Bolt's startup auth.test call so the module can
+# be imported in tests without real tokens.
+app = App(
+    token=os.environ["SLACK_BOT_TOKEN"],
+    token_verification_enabled=os.environ.get("SLACK_TOKEN_VERIFY", "1") != "0",
+)
 
-# Word categories that unique-namer draws from when building the word-word
-# combo. See namer.list_categories() for the 25 available options.
-NAMER_CATEGORIES = ["general"]
-
-app = App(token=os.environ["SLACK_BOT_TOKEN"])
-
-
-def generate_experiment_name(category: str) -> str:
-    """Build a name like 2026-07-04-bph-tattered-flower."""
-    today = date.today().isoformat()
-    combo = namer.generate(category=NAMER_CATEGORIES, separator="-", style="lowercase")
-    return f"{today}-{category}-{combo}"
-
-
-def category_buttons() -> list:
-    return [
-        {
-            "type": "button",
-            "action_id": f"pick_category_{code}",
-            "text": {"type": "plain_text", "text": code.upper()},
-            "value": code,
-        }
-        for code in EXPERIMENT_CATEGORIES
-    ]
-
-
-@app.command("/experiment")
-def open_category_prompt(ack, respond):
-    """Reply to /experiment with the category picker."""
-    ack()
-    respond(
-        response_type="ephemeral",
-        text=f"Pick a category for the new experiment: {', '.join(EXPERIMENT_CATEGORIES)}",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": ":test_tube: *New experiment* — pick a category:",
-                },
-            },
-            {
-                "type": "actions",
-                "block_id": "experiment_category",
-                "elements": category_buttons(),
-            },
-        ],
-    )
-
-
-@app.action(re.compile(r"pick_category_\w+"))
-def handle_category_pick(ack, body, respond, say):
-    """Generate the experiment name and announce it in the channel."""
-    ack()
-    category = body["actions"][0]["value"]  # e.g. "bph" or "cao"
-    user_id = body["user"]["id"]
-    experiment_name = generate_experiment_name(category)
-
-    # Replace the ephemeral picker so the buttons can't be clicked twice.
-    respond(
-        response_type="ephemeral",
-        replace_original=True,
-        text=f"Generated: {experiment_name}",
-    )
-
-    # Announce to the whole channel so the team sees the new experiment.
-    say(
-        text=f"New experiment: {experiment_name} (started by <@{user_id}>)",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f":sparkles: New experiment started by <@{user_id}>:\n"
-                        f"*`{experiment_name}`*"
-                    ),
-                },
-            },
-        ],
-    )
+register(app)
 
 
 if __name__ == "__main__":

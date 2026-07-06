@@ -12,8 +12,8 @@
         "slash_commands": [
             {
                 "command": "/experiment",
-                "description": "Generate a name for a new experiment",
-                "usage_hint": "",
+                "description": "Name and track lab experiments",
+                "usage_hint": "new | track <name> | date <date> | legacy [link] | delete <name|empty> | category <bph|cao>",
                 "should_escape": false
             }
         ]
