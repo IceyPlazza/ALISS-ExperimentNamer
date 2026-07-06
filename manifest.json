@@ -1,6 +1,6 @@
 {
     "display_information": {
-        "name": "Experiment Namer",
+        "name": "ALISS Experiment Namer",
         "description": "Generates unique names for new lab experiments",
         "background_color": "#4a154b"
     },
