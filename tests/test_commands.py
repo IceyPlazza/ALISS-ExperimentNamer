@@ -10,7 +10,9 @@ from core.slack.commands import (
     cmd_category,
     cmd_date,
     cmd_delete,
+    cmd_experiments,
     cmd_new,
+    cmd_scans,
     cmd_track,
 )
 
@@ -131,6 +133,70 @@ def test_cmd_track_not_found(monkeypatch, respond):
     assert "No Box folder found" in respond.text
 
 
+# ---- track by codename (not a full name / word-word combo) --------------
+
+
+def _codename_folders():
+    return [
+        {
+            "id": "1",
+            "name": "2026-07-05-cao-mad-polyphony-modelA",
+            "url": "https://app.box.com/folder/1",
+            "directory": "Experiments",
+            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-05-cao-mad-polyphony-modelA",
+        },
+        {
+            "id": "2",
+            "name": "2026-07-06-bph-glad-river-modelA",
+            "url": "https://app.box.com/folder/2",
+            "directory": "Experiments",
+            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-06-bph-glad-river-modelA",
+        },
+        {
+            "id": "3",
+            "name": "2026-07-07-cao-wry-oak-solo",
+            "url": "https://app.box.com/folder/3",
+            "directory": "Experiments",
+            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-07-cao-wry-oak-solo",
+        },
+        # no codename — must never match a codename query
+        {"id": "4", "name": "2026-07-08-bph-plain-name", "url": "u", "directory": "Scans", "path": "p"},
+    ]
+
+
+def test_cmd_track_codename_single_shows_detail(monkeypatch, respond):
+    monkeypatch.setattr(box_client, "list_experiment_folders", _codename_folders)
+    monkeypatch.setattr(box_client, "get_folder_description", lambda fid: "")
+    cmd_track(respond, "solo")  # single-token, not a combo
+    assert "2026-07-07-cao-wry-oak-solo" in respond.text  # full path/detail view
+    assert "app.box.com/folder/3" in respond.text
+    assert "use codename" not in respond.text  # not the multi-match listing
+
+
+def test_cmd_track_codename_duplicated_lists_all(monkeypatch, respond):
+    monkeypatch.setattr(box_client, "list_experiment_folders", _codename_folders)
+    cmd_track(respond, "modelA")
+    assert "2 experiments use codename `modelA`" in respond.text
+    assert "2026-07-05-cao-mad-polyphony-modelA" in respond.text
+    assert "2026-07-06-bph-glad-river-modelA" in respond.text
+    assert "2026-07-07-cao-wry-oak-solo" not in respond.text  # different codename
+
+
+def test_cmd_track_codename_not_found(monkeypatch, respond):
+    monkeypatch.setattr(box_client, "list_experiment_folders", _codename_folders)
+    cmd_track(respond, "nomatch")
+    assert "No experiment found with name or codename" in respond.text
+
+
+def test_cmd_track_codename_box_not_configured(monkeypatch, respond):
+    def unconfigured():
+        raise BoxNotConfiguredError("nope")
+
+    monkeypatch.setattr(box_client, "list_experiment_folders", unconfigured)
+    cmd_track(respond, "modelA")
+    assert "isn't connected" in respond.text
+
+
 # --------------------------------------------------------------------------
 # cmd_date
 # --------------------------------------------------------------------------
@@ -176,10 +242,70 @@ def test_cmd_category_found(monkeypatch, respond):
     monkeypatch.setattr(
         box_client,
         "list_experiments_by_category",
-        lambda c: [{"name": "2026-07-05-bph-a-b", "url": "u", "directory": "Scans"}],
+        lambda c=None, dk=None: [{"name": "2026-07-05-bph-a-b", "url": "u", "directory": "Scans"}],
     )
     cmd_category(respond, "BPH")  # case-insensitive
     assert "2026-07-05-bph-a-b" in respond.text
+
+
+# --------------------------------------------------------------------------
+# cmd_scans / cmd_experiments — per-directory listings
+# --------------------------------------------------------------------------
+
+
+def test_cmd_scans_lists_whole_directory(monkeypatch, respond):
+    seen = {}
+
+    def stub(c=None, dk=None):
+        seen["code"], seen["dir_key"] = c, dk
+        return [{"name": "2026-07-05-cao-a-b", "url": "u", "directory": "Data Collection and Scans"}]
+
+    monkeypatch.setattr(box_client, "list_experiments_by_category", stub)
+    monkeypatch.setattr(
+        box_client, "directory_info", lambda dk: {"label": "Data Collection and Scans", "path": None}
+    )
+    cmd_scans(respond, "")  # no category → everything in the Scans directory
+    assert seen == {"code": None, "dir_key": "scans"}
+    assert "All experiments in _Data Collection and Scans_" in respond.text
+    assert "2026-07-05-cao-a-b" in respond.text
+
+
+def test_cmd_scans_filtered_by_category(monkeypatch, respond):
+    seen = {}
+
+    def stub(c=None, dk=None):
+        seen["code"], seen["dir_key"] = c, dk
+        return [{"name": "2026-07-05-bph-a-b", "url": "u", "directory": "Data Collection and Scans"}]
+
+    monkeypatch.setattr(box_client, "list_experiments_by_category", stub)
+    monkeypatch.setattr(
+        box_client, "directory_info", lambda dk: {"label": "Data Collection and Scans", "path": None}
+    )
+    cmd_scans(respond, "BPH")  # case-insensitive
+    assert seen == {"code": "bph", "dir_key": "scans"}
+    assert "BPH experiments in _Data Collection and Scans_" in respond.text
+
+
+def test_cmd_scans_invalid_category(respond):
+    cmd_scans(respond, "xyz")
+    assert "Usage" in respond.text
+    assert "scans" in respond.text  # usage names the subcommand
+
+
+def test_cmd_experiments_scopes_to_experiments_dir(monkeypatch, respond):
+    seen = {}
+
+    def stub(c=None, dk=None):
+        seen["dir_key"] = dk
+        return []
+
+    monkeypatch.setattr(box_client, "list_experiments_by_category", stub)
+    monkeypatch.setattr(
+        box_client, "directory_info", lambda dk: {"label": "Experiments", "path": None}
+    )
+    cmd_experiments(respond, "")
+    assert seen["dir_key"] == "experiments"
+    assert "No experiments found in _Experiments_" in respond.text
 
 
 # --------------------------------------------------------------------------

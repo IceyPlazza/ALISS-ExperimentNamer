@@ -237,14 +237,22 @@ def list_experiments_by_date(date_str: str) -> list[dict]:
     ]
 
 
-def list_experiments_by_category(category: str) -> list[dict]:
-    """List experiment folders (from both directories) whose name contains
-    the category code (e.g. every folder matching *-bph-*)."""
+def list_experiments_by_category(
+    category: str | None = None, dir_key: str | None = None
+) -> list[dict]:
+    """List experiment folders, optionally filtered by category and/or
+    directory.
+
+    `category` (a code like "bph") keeps only names matching *-bph-*; None
+    keeps every folder. `dir_key` (a BOX_DIRECTORIES key, "scans"/
+    "experiments") scopes the crawl to that one directory; None searches both.
+    With both None this lists every experiment in both directories."""
+    dir_keys = [dir_key] if dir_key else list(BOX_DIRECTORIES)
     return [
-        _experiment_dict(item, dir_key)
-        for dir_key in BOX_DIRECTORIES
-        for item in _iter_subfolders(dir_key)
-        if f"-{category}-" in item.name
+        _experiment_dict(item, dk)
+        for dk in dir_keys
+        for item in _iter_subfolders(dk)
+        if category is None or f"-{category}-" in item.name
     ]
 
 

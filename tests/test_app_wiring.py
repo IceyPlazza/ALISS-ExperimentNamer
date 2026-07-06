@@ -90,7 +90,16 @@ def test_new_flow_actions_registered():
 
 
 def test_all_subcommands_present():
-    assert set(SUBCOMMANDS) == {"new", "track", "date", "delete", "category", "legacy"}
+    assert set(SUBCOMMANDS) == {
+        "new",
+        "track",
+        "date",
+        "delete",
+        "category",
+        "scans",
+        "experiments",
+        "legacy",
+    }
 
 
 def test_associate_legacy_submit_clears_stack_and_creates_once(monkeypatch):

@@ -15,13 +15,15 @@ from core.slack.naming import BOX_FOLDER_LINK_RE, EXPERIMENT_CATEGORIES
 USAGE = (
     "*Usage:* `/experiment <subcommand>`\n"
     "• `/experiment new` — generate a name for a new experiment\n"
-    "• `/experiment track <name | word-word>` — find an experiment's Box folder\n"
+    "• `/experiment track <name | word-word | codename>` — find an experiment's Box folder\n"
     "• `/experiment date <YYYY-MM-DD>` — list experiments from a date\n"
     "• `/experiment legacy [box-link]` — rename a legacy folder to the "
     "naming scheme\n"
     "• `/experiment delete <name>` — delete an experiment (must be empty)\n"
     "• `/experiment delete empty` — prune all experiments with no files\n"
-    f"• `/experiment category <{'|'.join(EXPERIMENT_CATEGORIES)}>` — list experiments by category"
+    f"• `/experiment category <{'|'.join(EXPERIMENT_CATEGORIES)}>` — list experiments by category (both directories)\n"
+    f"• `/experiment scans [{'|'.join(EXPERIMENT_CATEGORIES)}]` — list experiments in the Scans directory\n"
+    f"• `/experiment experiments [{'|'.join(EXPERIMENT_CATEGORIES)}]` — list experiments in the Experiments directory"
 )
 
 BOX_NOT_READY = (

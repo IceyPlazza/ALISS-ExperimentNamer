@@ -13,9 +13,11 @@ from core.box import box_client
 from core.box.box_client import AmbiguousExperimentError, BoxNotConfiguredError
 from core.slack.naming import (
     BOX_FOLDER_LINK_RE,
+    CODENAME_RE,
     EXPERIMENT_CATEGORIES,
     EXPERIMENT_NAME_RE,
     WORD_COMBO_RE,
+    extract_codename,
 )
 from core.slack.experiments import (
     parse_associations,
@@ -65,18 +67,51 @@ def cmd_new(respond, arg, **_):
 def cmd_track(respond, arg, **_):
     """Find an experiment's Box folder and link to it.
 
-    Accepts either the full name (2026-07-04-bph-decorous-harbor) or just
-    the word-word combo (decorous-harbor).
+    Accepts the full name (2026-07-04-bph-decorous-harbor), the word-word
+    combo (decorous-harbor), or a codename (the model label appended to an
+    Experiments-directory name). Names/combos resolve to a single folder
+    (combos are unique); a codename may be shared by several experiments, in
+    which case all of them are listed.
     """
     if not arg:
-        respond(text="Usage: `/experiment track <experiment-name | word-word>`")
-        return
-    if not (EXPERIMENT_NAME_RE.match(arg) or WORD_COMBO_RE.match(arg)):
         respond(
-            text=f"`{arg}` doesn't look like an experiment name "
-            "(expected `YYYY-MM-DD-category-word-word`, or just `word-word`)."
+            text="Usage: `/experiment track <experiment-name | word-word | codename>`"
         )
         return
+    is_name_or_combo = EXPERIMENT_NAME_RE.match(arg) or WORD_COMBO_RE.match(arg)
+    if not (is_name_or_combo or CODENAME_RE.match(arg)):
+        respond(
+            text=f"`{arg}` doesn't look like an experiment name "
+            "(expected `YYYY-MM-DD-category-word-word`, a `word-word` combo, "
+            "or a codename)."
+        )
+        return
+    if is_name_or_combo:
+        _track_single(respond, arg)
+    else:
+        _track_by_codename(respond, arg)
+
+
+def _render_experiment_detail(respond, label, folder):
+    """Reply with a single experiment's location, link, and associations.
+    `label` is echoed in the header (the user's query — name/combo/codename)."""
+    lines = [
+        f":file_folder: `{label}`",
+        f"• Location: `{folder['path']}`",
+        f"• <{folder['url']}|Open in Box>",
+    ]
+    # Associated experiments are stored in the folder's Box description.
+    associations = _read_associations(folder["id"])
+    if associations:
+        lines.append("• Associated experiments:")
+        for a in associations:
+            ref = f"<{a['url']}|{a['label']}>" if a["url"] else f"`{a['label']}`"
+            lines.append(f"    ◦ {ref}")
+    respond(text="\n".join(lines))
+
+
+def _track_single(respond, arg):
+    """Track by full name or word-word combo — resolves to one folder."""
     try:
         folder = box_client.find_experiment_folder(arg)
     except BoxNotConfiguredError:
@@ -91,20 +126,29 @@ def cmd_track(respond, arg, **_):
     except KeyError:
         respond(text=f":mag: No Box folder found for `{arg}`.")
         return
+    _render_experiment_detail(respond, arg, folder)
 
-    lines = [
-        f":file_folder: `{arg}`",
-        f"• Location: `{folder['path']}`",
-        f"• <{folder['url']}|Open in Box>",
-    ]
-    # Associated experiments are stored in the folder's Box description.
-    associations = _read_associations(folder["id"])
-    if associations:
-        lines.append("• Associated experiments:")
-        for a in associations:
-            ref = f"<{a['url']}|{a['label']}>" if a["url"] else f"`{a['label']}`"
-            lines.append(f"    ◦ {ref}")
-    respond(text="\n".join(lines))
+
+def _track_by_codename(respond, arg):
+    """Track by codename. Codenames aren't unique: one match renders in full,
+    several are listed. Filters the folder crawl through extract_codename so
+    scan-count suffixes and combo-only names never match."""
+    try:
+        folders = box_client.list_experiment_folders()
+    except BoxNotConfiguredError:
+        respond(text=BOX_NOT_READY)
+        return
+    matches = [f for f in folders if extract_codename(f["name"]) == arg]
+    if not matches:
+        respond(text=f":mag: No experiment found with name or codename `{arg}`.")
+        return
+    if len(matches) == 1:
+        _render_experiment_detail(respond, arg, matches[0])
+        return
+    respond(
+        text=f"*{len(matches)} experiments use codename `{arg}`:*\n"
+        + format_experiment_list(matches)
+    )
 
 
 def cmd_date(respond, arg, **_):
@@ -194,7 +238,8 @@ def prune_empty_experiments(respond, say=None, body=None):
 
 
 def cmd_category(respond, arg, **_):
-    """List experiments belonging to a category code."""
+    """List experiments belonging to a category code (across both
+    directories)."""
     code = arg.lower()
     if code not in EXPERIMENT_CATEGORIES:
         respond(
@@ -212,6 +257,42 @@ def cmd_category(respond, arg, **_):
     respond(
         text=f"*{code.upper()} experiments:*\n" + format_experiment_list(experiments)
     )
+
+
+def _list_directory(respond, arg, dir_key):
+    """Shared body for /experiment scans and /experiment experiments: list
+    that one directory's experiments, optionally filtered to a category code.
+    No category → everything in the directory."""
+    code = arg.strip().lower() or None
+    if code is not None and code not in EXPERIMENT_CATEGORIES:
+        respond(
+            text=f"Usage: `/experiment {dir_key} [{'|'.join(EXPERIMENT_CATEGORIES)}]`"
+        )
+        return
+    try:
+        experiments = box_client.list_experiments_by_category(code, dir_key)
+    except BoxNotConfiguredError:
+        respond(text=BOX_NOT_READY)
+        return
+    label = box_client.directory_info(dir_key)["label"]
+    if not experiments:
+        who = f"{code.upper()} " if code else ""
+        respond(text=f":mag: No {who}experiments found in _{label}_.")
+        return
+    heading = f"{code.upper()} experiments" if code else "All experiments"
+    respond(
+        text=f"*{heading} in _{label}_:*\n" + format_experiment_list(experiments)
+    )
+
+
+def cmd_scans(respond, arg, **_):
+    """List experiments in the Scans directory, optionally by category."""
+    _list_directory(respond, arg, "scans")
+
+
+def cmd_experiments(respond, arg, **_):
+    """List experiments in the Experiments directory, optionally by category."""
+    _list_directory(respond, arg, "experiments")
 
 
 def cmd_legacy(respond, arg, client=None, body=None, **_):
@@ -237,5 +318,7 @@ SUBCOMMANDS = {
     "date": cmd_date,
     "delete": cmd_delete,
     "category": cmd_category,
+    "scans": cmd_scans,
+    "experiments": cmd_experiments,
     "legacy": cmd_legacy,
 }

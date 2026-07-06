@@ -29,8 +29,21 @@ EXPERIMENT_NAME_RE = re.compile(
 # Combos are unique across experiments, so track/delete accept them alone.
 WORD_COMBO_RE = re.compile(r"^[a-z]+(-[a-z]+)+$")
 
+# A codename as typed in the "Add details…" dialog: the model label appended
+# to an Experiments-directory name (…-word-word-codename), sanitized to
+# [A-Za-z0-9._-] at creation. `track` accepts the same shape so codenames are
+# lookup-able. Unlike combos, codenames are NOT unique — several experiments
+# may share one.
+CODENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
 # A Box folder link, e.g. https://vanderbilt.app.box.com/folder/123456789
 BOX_FOLDER_LINK_RE = re.compile(r"box\.com/folder/(\d+)")
+
+# The base scheme through the two-word combo, capturing whatever suffix
+# follows it: YYYY-MM-DD-category-word-word-<suffix>.
+_NAME_SUFFIX_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}-[a-z0-9]+-[a-z]+-[a-z]+-(?P<suffix>.+)$"
+)
 
 
 def generate_word_combo() -> str:
@@ -58,6 +71,25 @@ def detect_date(folder_name: str) -> str | None:
     except ValueError:
         return None
     return normalized
+
+
+def extract_codename(folder_name: str) -> str | None:
+    """Return the codename appended to an experiment folder name, or None.
+
+    Experiments-directory names may carry a model label after the word-word
+    combo: YYYY-MM-DD-category-word-word-codename (e.g.
+    2026-07-05-cao-mad-polyphony-modelA -> "modelA"). Names with no suffix,
+    and scan-count suffixes ("…-(3)", scans directory), return None — only
+    real codenames are trackable. Case is preserved (codenames are matched
+    case-sensitively).
+    """
+    m = _NAME_SUFFIX_RE.match(folder_name)
+    if not m:
+        return None
+    suffix = m.group("suffix")
+    if re.fullmatch(r"\(\d+\)", suffix):  # scan count, not a codename
+        return None
+    return suffix
 
 
 def detect_category(folder_name: str) -> str | None:

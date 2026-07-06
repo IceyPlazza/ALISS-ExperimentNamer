@@ -7,10 +7,12 @@ import pytest
 from core.slack import naming
 from core.slack.naming import (
     BOX_FOLDER_LINK_RE,
+    CODENAME_RE,
     EXPERIMENT_NAME_RE,
     WORD_COMBO_RE,
     detect_category,
     detect_date,
+    extract_codename,
     generate_experiment_name,
     generate_word_combo,
 )
@@ -98,6 +100,36 @@ def test_experiment_name_re(name, matches):
 )
 def test_word_combo_re(combo, matches):
     assert bool(WORD_COMBO_RE.match(combo)) is matches
+
+
+@pytest.mark.parametrize(
+    "folder_name,expected",
+    [
+        ("2026-07-05-cao-mad-polyphony-modelA", "modelA"),  # codename
+        ("2026-07-05-cao-mad-polyphony-model-v2", "model-v2"),  # hyphenated
+        ("2026-07-05-bph-sunny-harbor-(3)", None),  # scan count, not a codename
+        ("2026-07-04-bph-decorous-harbor", None),  # no suffix
+        ("2025-10-08-bph-coolly-cut", None),  # legacy, no suffix
+        ("2026-06-17 - FLR: CT", None),  # not the scheme
+    ],
+)
+def test_extract_codename(folder_name, expected):
+    assert extract_codename(folder_name) == expected
+
+
+@pytest.mark.parametrize(
+    "codename,matches",
+    [
+        ("modelA", True),
+        ("model_v2", True),
+        ("model-v2", True),
+        ("v1.0", True),
+        ("has space", False),
+        ("no!", False),
+    ],
+)
+def test_codename_re(codename, matches):
+    assert bool(CODENAME_RE.match(codename)) is matches
 
 
 @pytest.mark.parametrize(
