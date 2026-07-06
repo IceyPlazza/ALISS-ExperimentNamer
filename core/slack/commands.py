@@ -131,10 +131,12 @@ def _track_single(respond, arg):
 
 def _track_by_codename(respond, arg):
     """Track by codename. Codenames aren't unique: one match renders in full,
-    several are listed. Filters the folder crawl through extract_codename so
-    scan-count suffixes and combo-only names never match."""
+    several are listed. Codenames only exist in the Experiments directory
+    (Scans names carry a scan-count suffix instead), so scope the crawl there
+    and filter through extract_codename so scan-count/combo-only names never
+    match."""
     try:
-        folders = box_client.list_experiment_folders()
+        folders = box_client.list_experiments_by_category(dir_key="experiments")
     except BoxNotConfiguredError:
         respond(text=BOX_NOT_READY)
         return

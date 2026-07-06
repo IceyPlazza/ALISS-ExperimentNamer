@@ -7,12 +7,16 @@ The two-word combo comes from the `unique-namer` package
 (https://github.com/aziele/unique-namer).
 
 Subcommands (see CLAUDE.md for the full spec):
-    /experiment new                — pick a category, generate a new name
-    /experiment track <name>       — find the experiment's Box folder + link
-    /experiment date <YYYY-MM-DD>  — list experiments generated on a date
-    /experiment delete <name>      — delete an experiment (only if empty)
-    /experiment category <code>    — list experiments for bph or cao
-    /experiment legacy [box-link]  — rename a legacy folder to the scheme
+    /experiment new                    — pick a category, generate a new name
+    /experiment track <name|combo|codename>
+                                       — find the experiment's Box folder + link
+    /experiment date <YYYY-MM-DD>      — list experiments generated on a date
+    /experiment delete <name>          — delete an experiment (only if empty)
+    /experiment delete empty           — prune every empty experiment folder
+    /experiment category <code>        — list experiments for bph or cao (both dirs)
+    /experiment scans [code]           — list experiments in the Scans directory
+    /experiment experiments [code]     — list experiments in the Experiments directory
+    /experiment legacy [box-link]      — rename a legacy folder to the scheme
 
 The app is assembled from the modules under `core/slack`:
     naming       — name generation, detection, validation (pure helpers)

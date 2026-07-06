@@ -136,7 +136,9 @@ def test_cmd_track_not_found(monkeypatch, respond):
 # ---- track by codename (not a full name / word-word combo) --------------
 
 
-def _codename_folders():
+def _codename_folders(category=None, dir_key=None):
+    # Stands in for list_experiments_by_category(dir_key="experiments"): the
+    # codename crawl is scoped to the Experiments directory.
     return [
         {
             "id": "1",
@@ -160,12 +162,12 @@ def _codename_folders():
             "path": "\\Box\\ARPA-H\\Experiments\\2026-07-07-cao-wry-oak-solo",
         },
         # no codename — must never match a codename query
-        {"id": "4", "name": "2026-07-08-bph-plain-name", "url": "u", "directory": "Scans", "path": "p"},
+        {"id": "4", "name": "2026-07-08-bph-plain-combo", "url": "u", "directory": "Experiments", "path": "p"},
     ]
 
 
 def test_cmd_track_codename_single_shows_detail(monkeypatch, respond):
-    monkeypatch.setattr(box_client, "list_experiment_folders", _codename_folders)
+    monkeypatch.setattr(box_client, "list_experiments_by_category", _codename_folders)
     monkeypatch.setattr(box_client, "get_folder_description", lambda fid: "")
     cmd_track(respond, "solo")  # single-token, not a combo
     assert "2026-07-07-cao-wry-oak-solo" in respond.text  # full path/detail view
@@ -174,7 +176,7 @@ def test_cmd_track_codename_single_shows_detail(monkeypatch, respond):
 
 
 def test_cmd_track_codename_duplicated_lists_all(monkeypatch, respond):
-    monkeypatch.setattr(box_client, "list_experiment_folders", _codename_folders)
+    monkeypatch.setattr(box_client, "list_experiments_by_category", _codename_folders)
     cmd_track(respond, "modelA")
     assert "2 experiments use codename `modelA`" in respond.text
     assert "2026-07-05-cao-mad-polyphony-modelA" in respond.text
@@ -183,16 +185,16 @@ def test_cmd_track_codename_duplicated_lists_all(monkeypatch, respond):
 
 
 def test_cmd_track_codename_not_found(monkeypatch, respond):
-    monkeypatch.setattr(box_client, "list_experiment_folders", _codename_folders)
+    monkeypatch.setattr(box_client, "list_experiments_by_category", _codename_folders)
     cmd_track(respond, "nomatch")
     assert "No experiment found with name or codename" in respond.text
 
 
 def test_cmd_track_codename_box_not_configured(monkeypatch, respond):
-    def unconfigured():
+    def unconfigured(category=None, dir_key=None):
         raise BoxNotConfiguredError("nope")
 
-    monkeypatch.setattr(box_client, "list_experiment_folders", unconfigured)
+    monkeypatch.setattr(box_client, "list_experiments_by_category", unconfigured)
     cmd_track(respond, "modelA")
     assert "isn't connected" in respond.text
 
