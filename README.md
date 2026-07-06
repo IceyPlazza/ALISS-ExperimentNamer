@@ -1,6 +1,6 @@
-# Experiment Namer
+# ALISS Experiment Namer
 
-A Slack app that generates unique names for new lab experiments in the format:
+A Slack app that generates unique names for new ALISS experiments in the format:
 
 ```
 YYYY-MM-DD-{category}-word-word
