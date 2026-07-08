@@ -1,28 +1,36 @@
 # ALISS Experiment Namer
 
-A Slack app that generates unique names for new ALISS experiments in the format:
+A Slack app that generates unique names for new ALISS experiments. The format
+depends on the Box directory:
 
 ```
-YYYY-MM-DD-{category}-word-word
+Experiments:  YYYY-MM-DD-codename-CATEGORY-action-user
+Scans:        YYYY-MM-DD-codename-CATEGORY-(num)-user
 ```
 
-e.g. `2026-07-04-bph-tattered-flower`. The categories are `bph` and `cao`,
-and the two-word combo comes from
-[unique-namer](https://github.com/aziele/unique-namer).
+e.g. `2026-07-06-tattered-flower-BPH-segmentation-iven.chen` or
+`2026-07-06-tattered-flower-BPH-(3)-iven.chen`. The categories are `bph`, `cao`,
+and `flr` (uppercased in the name); the `codename` is an auto-generated,
+unique adjective-noun pair from
+[unique-namer](https://github.com/aziele/unique-namer) (or a user override) and
+is the lookup key; `user` is the creator's Slack handle.
 
 ## Commands
 
 | Command | What it does                                                                                                                                                                                                                                                                                                                                                                                                             |
 |---|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `/experiment new` | Pick a category (**BPH**/**CAO**) and a Box directory, then "Create now" or "Add details…" — optional scan count (`…-word-word-(3)`) or model codename (`…-word-word-modelA`) depending on the directory, plus an optional associated experiment (by word-word combo, full name, or Box link — with an option to rename a legacy associated folder to the naming scheme on the spot). The name is posted to the channel. |
-| `/experiment track <name \| word-word \| codename>` | Find the experiment's Box folder — full path plus a direct link, and any associated experiments. The bare `word-word` combo is enough; a codename (the model label on an Experiments-directory name) lists every experiment that shares it.                                                                                                                                                                                |
+| `/experiment new` | Pick a category (**BPH**/**CAO**/**FLR**) and a Box directory, then fill in the details dialog: an optional codename (blank → auto-generated & unique), the required directory-specific segment — number of scans (Scans) or action (Experiments) — plus optional associated experiments (by codename, full name, or Box link — with an option to rename a legacy associated folder to the scheme on the spot). Your Slack handle fills the `user` segment. The name is posted to the channel. |
+| `/experiment subexperiment [box-link]` | Create an experiment **under** a parent: paste the parent's Box link, optionally set a codename, give an action + date, and choose where the folder goes — nested inside the parent (default) or top-level in Experiments/Scans. It always inherits the parent's category (they can't diverge), but its date can differ (a sub-experiment run later); the parent↔child link is recorded both ways (shown in `track` and flagged in listings). |
+| `/experiment track <name \| codename>` | Find the experiment's Box folder — full path plus a direct link, its parent + sub-experiments (if any), and any associated experiments. The bare `codename` is the unique lookup key; if several folders share one, all matches are listed.                                                                                                                                                                              |
 | `/experiment date <YYYY-MM-DD>` | List experiments generated on that date.                                                                                                                                                                                                                                                                                                                                                                                 |
 | `/experiment delete <name>` | Delete an experiment — refuses if its Box folder has files.                                                                                                                                                                                                                                                                                                                                                              |
 | `/experiment delete empty` | Prune every experiment whose Box folder has no files.                                                                                                                                                                                                                                                                                                                                                                    |
-| `/experiment category <bph\|cao>` | List experiments for a category, across both directories.                                                                                                                                                                                                                                                                                                                                                                |
-| `/experiment scans [bph\|cao]` | List experiments in the **Scans** directory, optionally filtered to a category.                                                                                                                                                                                                                                                                                                                                          |
-| `/experiment experiments [bph\|cao]` | List experiments in the **Experiments** directory, optionally filtered to a category.                                                                                                                                                                                                                                                                                                                                    |
-| `/experiment legacy [box-link]` | Rename a legacy folder (e.g. `2026-06-17 - FLR: CT`) to the naming scheme — date/category auto-detected from the old name, prompted for otherwise.                                                                                                                                                                                                                                                                       |
+| `/experiment category <bph\|cao\|flr>` | List experiments for a category, across both directories.                                                                                                                                                                                                                                                                                                                                                                |
+| `/experiment scans [bph\|cao\|flr]` | List experiments in the **Data Collection and Scans** directory, optionally filtered to a category.                                                                                                                                                                                                                                                                                                                      |
+| `/experiment experiments [bph\|cao\|flr]` | List experiments in the **Experiments** directory, optionally filtered to a category.                                                                                                                                                                                                                                                                                                                                    |
+| `/experiment legacy [box-link]` | Rename a legacy folder (e.g. `2026-06-17 - FLR: CT`) to the naming scheme — date/category auto-detected from the old name, prompted for otherwise. If the folder holds subfolders, optionally register them as sub-experiments (keeping their names, skipping any `calibration` folder); indexing them is a separate opt-in.                                                                                                                                                                                                                                                                       |
+| `/experiment database <retrieve\|update>` | `retrieve`: link to the `experiment_index.csv` spreadsheet mirror (in a `.experiment-namer` Box folder). `update`: reconcile that index against Box. |
+| `/experiment help` | A full, readable guide to every command (longer than the short usage shown on no/unknown subcommand). |
 
 Experiments live in one of two Box directories — `\Box\ARPA-H\Data Collection
 and Scans` or `\Box\ARPA-H\Experiments`. `/experiment new` asks which one to
@@ -114,9 +122,9 @@ create and delete folders.
 ## Configuration
 
 - `EXPERIMENT_CATEGORIES` in `core/slack/naming.py` is the list of category
-  codes offered by the picker (currently `["bph", "cao"]`). Adding a code
+  codes offered by the picker (currently `["bph", "cao", "flr"]`). Adding a code
   there adds a button automatically.
 - `NAMER_CATEGORIES` in `core/slack/naming.py` controls which unique-namer word lists are
-  used for the word-word combo (default `["general"]`). Run
+  used for the auto-generated codename (default `["general"]`). Run
   `python -c "import namer; print(namer.list_categories())"` to see all 25
   options (e.g. `biology`, `chemistry`, `astronomy`, `animals`).

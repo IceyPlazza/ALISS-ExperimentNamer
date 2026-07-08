@@ -13,7 +13,7 @@ Subcommands (see CLAUDE.md for the full spec):
     /experiment date <YYYY-MM-DD>      — list experiments generated on a date
     /experiment delete <name>          — delete an experiment (only if empty)
     /experiment delete empty           — prune every empty experiment folder
-    /experiment category <code>        — list experiments for bph or cao (both dirs)
+    /experiment category <code>        — list experiments for bph, cao, or flr (both dirs)
     /experiment scans [code]           — list experiments in the Scans directory
     /experiment experiments [code]     — list experiments in the Experiments directory
     /experiment legacy [box-link]      — rename a legacy folder to the scheme

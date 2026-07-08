@@ -13,7 +13,7 @@
             {
                 "command": "/experiment",
                 "description": "Name and track lab experiments",
-                "usage_hint": "new | track <name> | date <date> | legacy [link] | delete <name|empty> | category <bph|cao>",
+                "usage_hint": "new | subexperiment [link] | track <name|codename> | date <date> | scans|experiments [bph|cao|flr] | category <bph|cao|flr> | legacy [link] | delete <name|empty> | database <retrieve|update> | help",
                 "should_escape": false
             }
         ]

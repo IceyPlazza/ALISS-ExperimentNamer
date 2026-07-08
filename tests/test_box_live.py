@@ -165,6 +165,39 @@ def test_association_description_round_trip(box):
         box.delete_experiment_folder(folder["id"])
 
 
+def test_csv_file_round_trip(box):
+    """The generic file helpers backing csv_index survive a real upload →
+    find → download round-trip. Creates a throwaway folder + file under
+    BOX_ROOT_FOLDER_ID and cleans both up."""
+    root = os.environ.get("BOX_ROOT_FOLDER_ID", "").strip()
+    if not root:
+        pytest.skip("BOX_ROOT_FOLDER_ID not set")
+
+    folder_name = f".experiment-namer-test{TEST_SUFFIX}"
+    folder_id = box.create_child_folder(root, folder_name)
+    csv_name = "roundtrip.csv"
+    text = "experiment_name,category\n2026-07-06-bph-a-b,bph\n"
+    try:
+        result = box.upload_file_text(folder_id, csv_name, text)
+        assert box.find_child_file(folder_id, csv_name) == result["id"]
+        assert box.download_file_text(result["id"]) == text
+
+        # upload_file_version overwrites in place (same id, new content)
+        text2 = text + "2026-07-06-cao-c-d,cao\n"
+        result2 = box.upload_file_text(
+            folder_id, csv_name, text2, existing_file_id=result["id"]
+        )
+        assert result2["id"] == result["id"]
+        assert box.download_file_text(result["id"]) == text2
+
+        box.get_client().files.delete_file_by_id(result["id"])
+    finally:
+        try:
+            box.delete_experiment_folder(folder_id)
+        except Exception:
+            pass  # best-effort cleanup
+
+
 def test_bidirectional_association_round_trip(box):
     """Associating X→Y writes a back-reference X onto Y's folder, and removing
     it (as on delete) strips it again — all against real Box folders."""

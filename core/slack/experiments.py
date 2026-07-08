@@ -8,18 +8,29 @@ in `post_message` / `update_ephemeral` callables.
 
 import logging
 
-from core.box import box_client
+from core.box import box_client, csv_index
 from core.box.box_client import AmbiguousExperimentError, BoxNotConfiguredError
 from core.slack.naming import (
     BOX_FOLDER_LINK_RE,
+    CODENAME_RE,
     EXPERIMENT_NAME_RE,
-    WORD_COMBO_RE,
+    build_experiment_name,
     detect_category,
     detect_date,
-    generate_experiment_name,
-    generate_word_combo,
+    generate_codename,
+    sanitize_segment,
 )
 from core.slack.views import BOX_NOT_READY
+
+
+def _taken_codenames():
+    """Codenames already in the CSV index, so name generation can re-roll to
+    keep codenames unique. Best-effort — an empty set (no uniqueness check) if
+    the index isn't reachable, so creation never blocks."""
+    try:
+        return csv_index.taken_codenames()
+    except Exception:
+        return set()
 
 
 class AssociationError(ValueError):
@@ -37,13 +48,23 @@ class LegacyConversionError(Exception):
         self.field = field
 
 
-def convert_legacy_folder(folder_id, picked_date=None, picked_category=None) -> dict:
-    """Rename a legacy Box folder to YYYY-MM-DD-category-word-word.
+def convert_legacy_folder(
+    folder_id,
+    picked_date=None,
+    picked_category=None,
+    action=None,
+    num_scans=None,
+    user="",
+) -> dict:
+    """Rename a legacy Box folder to the current naming scheme.
 
-    Shared by /experiment legacy and the associate-experiment dialog. Date
-    and category are auto-detected from the folder name; explicit picks win
-    over detection. Returns {"id", "name", "url", "old_name", "dir_key"}.
-    Raises LegacyConversionError for anything the user must fix.
+    Shared by /experiment legacy and the associate-experiment dialog. Date and
+    category are auto-detected from the folder name; explicit picks win over
+    detection. The new name follows the directory's scheme, so the caller must
+    supply the directory-specific segment — `action` for Experiments, `num_scans`
+    for Scans — plus `user` (the converter's Slack handle). Returns
+    {"id", "name", "url", "old_name", "dir_key"}. Raises LegacyConversionError
+    for anything the user must fix.
     """
     try:
         info = box_client.get_folder_info(folder_id)
@@ -70,10 +91,33 @@ def convert_legacy_folder(folder_id, picked_date=None, picked_category=None) -> 
     if not category:
         raise LegacyConversionError(
             "category",
-            f'Couldn\'t detect BPH/CAO in "{old_name}" — choose one here.',
+            f'Couldn\'t detect BPH/CAO/FLR in "{old_name}" — choose one here.',
         )
 
-    new_name = f"{exp_date}-{category}-{generate_word_combo()}"
+    action = sanitize_segment(action)
+    if dir_key == "scans":
+        if not num_scans:
+            raise LegacyConversionError(
+                "scan_count",
+                f'"{old_name}" is in the Scans directory — enter the number '
+                "of scans.",
+            )
+    elif not action:
+        raise LegacyConversionError(
+            "action",
+            f'"{old_name}" is in the Experiments directory — enter an action.',
+        )
+
+    codename = generate_codename(exclude=_taken_codenames())
+    new_name = build_experiment_name(
+        dir_key,
+        category,
+        codename,
+        sanitize_segment(user),
+        action=action,
+        num_scans=num_scans,
+        on_date=exp_date,
+    )
     try:
         renamed = box_client.rename_folder(folder_id, new_name)
     except Exception as e:
@@ -81,16 +125,81 @@ def convert_legacy_folder(folder_id, picked_date=None, picked_category=None) -> 
     return {**renamed, "old_name": old_name, "dir_key": dir_key}
 
 
+class SubexperimentError(ValueError):
+    """User-facing problem creating a sub-experiment. `field` names the modal
+    block to attach the message to."""
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message)
+        self.field = field
+
+
+def _dir_key_for_folder(parent_id):
+    """Which top-level experiment directory a folder ultimately lives under,
+    walking up its ancestry (so nested sub-experiment parents resolve too).
+    None if it isn't inside either directory."""
+    cur = parent_id
+    for _ in range(12):  # bounded walk-up
+        if cur is None:
+            break
+        dk = box_client.directory_key_for_parent(cur)
+        if dk:
+            return dk
+        try:
+            cur = box_client.get_folder_info(cur)["parent_id"]
+        except Exception:
+            break
+    return None
+
+
+def resolve_parent(folder_id: str) -> dict:
+    """Resolve a pasted parent-experiment link to
+    {folder_id, name, url, dir_key, category}. `category` may be None if the
+    parent's name has no detectable category (the caller then trusts the user's
+    picked category). Raises SubexperimentError(field, msg) for problems the
+    user must fix."""
+    try:
+        info = box_client.get_folder_info(folder_id)
+    except BoxNotConfiguredError:
+        raise SubexperimentError("parent_link", BOX_NOT_READY)
+    except Exception as e:
+        raise SubexperimentError("parent_link", f"Couldn't read that folder: {e}")
+
+    dir_key = _dir_key_for_folder(info["parent_id"])
+    if dir_key is None:
+        raise SubexperimentError(
+            "parent_link",
+            "That folder isn't inside either experiment directory — paste a "
+            "link to an experiment folder.",
+        )
+    return {
+        "folder_id": folder_id,
+        "name": info["name"],
+        "url": f"https://app.box.com/folder/{folder_id}",
+        "dir_key": dir_key,
+        "category": detect_category(info["name"]),
+    }
+
+
 # --------------------------------------------------------------------------
-# Associations
+# Relationships stored in the Box folder description
 #
-# An experiment can be associated with several others. Each association is a
-# dict {"label", "url", "mrkdwn"}: `label`/`url` are persisted to the new
-# folder's Box description (see serialize/parse below) so `/experiment track`
-# can list them; `mrkdwn` is the rendered reference for the announcement.
+# A folder description holds up to three app-managed sections, each a bullet
+# list of `label | url` entries under a header line:
+#   - "Associated experiments:" — symmetric peer links (several).
+#   - "Parent experiment:"      — the one experiment this is a sub-experiment
+#                                 of (directed; at most one entry).
+#   - "Sub-experiments:"        — the children of this experiment (directed).
+# Parsing is header-scoped and preserves any human-written preamble AND the
+# other sections, so writing one never clobbers the rest.
 # --------------------------------------------------------------------------
 
 ASSOC_HEADER = "Associated experiments:"
+PARENT_HEADER = "Parent experiment:"
+CHILDREN_HEADER = "Sub-experiments:"
+
+# All headers the app manages; used to bound each section when parsing.
+KNOWN_HEADERS = [ASSOC_HEADER, PARENT_HEADER, CHILDREN_HEADER]
 
 
 def _ref_mrkdwn(label: str, url: str | None) -> str:
@@ -98,42 +207,35 @@ def _ref_mrkdwn(label: str, url: str | None) -> str:
     return f"<{url}|{label}>" if url else f"`{label}`"
 
 
-def associations_to_description(associations: list[dict]) -> str:
-    """Serialize associations into a Box folder description — human-readable
-    (the team may read it in Box) and round-trippable by parse_associations.
-
-        Associated experiments:
-        - 2026-07-05-bph-a-b | https://app.box.com/folder/9
-    """
-    if not associations:
+def _serialize_section(header: str, entries: list[dict]) -> str:
+    """Serialize one section (header + `- label | url` bullets), "" if empty."""
+    if not entries:
         return ""
-    lines = [ASSOC_HEADER]
-    for a in associations:
-        lines.append(f"- {a['label']} | {a.get('url') or ''}")
+    lines = [header]
+    for e in entries:
+        lines.append(f"- {e['label']} | {e.get('url') or ''}")
     return "\n".join(lines)
 
 
-def parse_associations(description: str) -> list[dict]:
-    """Parse the association list out of a folder description.
-
-    Only reads the block AFTER the `Associated experiments:` header, so any
-    human-written text before it is ignored (and preserved by
-    set_associations_in_description). Tolerant of hand-edits: skips lines that
-    aren't association bullets. Returns [] if there's no header."""
+def _parse_section(description: str, header: str) -> list[dict]:
+    """Parse the `label | url` entries under `header`, header-scoped: stops at
+    the next known section header and tolerates junk lines. [] if absent."""
     lines = (description or "").splitlines()
     start = None
     for i, line in enumerate(lines):
-        if line.strip() == ASSOC_HEADER:
+        if line.strip() == header:
             start = i + 1
             break
     if start is None:
         return []
     out = []
     for line in lines[start:]:
-        line = line.strip()
-        if not line.startswith("- "):
+        s = line.strip()
+        if s in KNOWN_HEADERS:  # start of the next section
+            break
+        if not s.startswith("- "):
             continue
-        label, _, url = line[2:].partition("|")
+        label, _, url = s[2:].partition("|")
         label, url = label.strip(), url.strip()
         if not label:
             continue
@@ -141,23 +243,68 @@ def parse_associations(description: str) -> list[dict]:
     return out
 
 
-def set_associations_in_description(existing: str, associations: list[dict]) -> str:
-    """Return `existing` with its associations block replaced by
-    `associations`, preserving any human-written text before the header.
-
-    Used for the write-back onto associated folders, whose descriptions may
-    contain real content we must not clobber."""
-    lines = (existing or "").splitlines()
-    preamble = lines
+def _preamble(description: str) -> str:
+    """The human-written text before the first known section header."""
+    lines = (description or "").splitlines()
     for i, line in enumerate(lines):
-        if line.strip() == ASSOC_HEADER:
-            preamble = lines[:i]
-            break
-    preamble_text = "\n".join(preamble).rstrip()
-    block = associations_to_description(associations)
-    if preamble_text and block:
-        return f"{preamble_text}\n\n{block}"
-    return preamble_text or block
+        if line.strip() in KNOWN_HEADERS:
+            return "\n".join(lines[:i]).rstrip()
+    return "\n".join(lines).rstrip()
+
+
+def _set_section(existing: str, header: str, entries: list[dict]) -> str:
+    """Return `existing` with `header`'s section replaced by `entries` (removed
+    if empty), preserving the preamble and every OTHER known section."""
+    sections = {h: _parse_section(existing, h) for h in KNOWN_HEADERS}
+    sections[header] = entries
+    blocks = []
+    preamble = _preamble(existing)
+    if preamble:
+        blocks.append(preamble)
+    for h in KNOWN_HEADERS:
+        block = _serialize_section(h, sections[h])
+        if block:
+            blocks.append(block)
+    return "\n\n".join(blocks)
+
+
+def associations_to_description(associations: list[dict]) -> str:
+    """Serialize associations to a standalone description block (used to seed a
+    brand-new folder's description). Human-readable and round-trippable."""
+    return _serialize_section(ASSOC_HEADER, associations)
+
+
+def parse_associations(description: str) -> list[dict]:
+    """The `Associated experiments:` entries from a folder description ([] if
+    none)."""
+    return _parse_section(description, ASSOC_HEADER)
+
+
+def set_associations_in_description(existing: str, associations: list[dict]) -> str:
+    """Replace just the associations section, preserving preamble + other
+    sections."""
+    return _set_section(existing, ASSOC_HEADER, associations)
+
+
+def parse_parent(description: str) -> dict | None:
+    """The single `Parent experiment:` entry, or None."""
+    got = _parse_section(description, PARENT_HEADER)
+    return got[0] if got else None
+
+
+def set_parent_in_description(existing: str, parent: dict | None) -> str:
+    """Set (or clear, if None) the parent section, preserving everything else."""
+    return _set_section(existing, PARENT_HEADER, [parent] if parent else [])
+
+
+def parse_children(description: str) -> list[dict]:
+    """The `Sub-experiments:` entries from a folder description ([] if none)."""
+    return _parse_section(description, CHILDREN_HEADER)
+
+
+def set_children_in_description(existing: str, children: list[dict]) -> str:
+    """Replace just the sub-experiments section, preserving everything else."""
+    return _set_section(existing, CHILDREN_HEADER, children)
 
 
 def _folder_id_from_url(url: str | None) -> str | None:
@@ -196,6 +343,27 @@ def add_back_references(experiment: dict, associations: list[dict]) -> None:
             )
 
 
+def add_child_reference(parent_folder_id: str, child: dict) -> None:
+    """Append `child` ({label, url}) to the parent folder's `Sub-experiments:`
+    section (deduped by folder id, preserving everything else). Best-effort."""
+    child_id = _folder_id_from_url(child.get("url"))
+    try:
+        existing = box_client.get_folder_description(parent_folder_id)
+        current = parse_children(existing)
+        if any(_folder_id_from_url(c.get("url")) == child_id for c in current):
+            return  # already referenced
+        current.append(child)
+        box_client.set_folder_description(
+            parent_folder_id, set_children_in_description(existing, current)
+        )
+    except Exception:
+        logging.warning(
+            "could not add sub-experiment reference to folder %s",
+            parent_folder_id,
+            exc_info=True,
+        )
+
+
 def purge_references(deleted_ids) -> None:
     """Strip any association pointing at a deleted folder from EVERY other
     experiment folder's description (both directories).
@@ -211,7 +379,7 @@ def purge_references(deleted_ids) -> None:
     if not deleted_ids:
         return
     try:
-        folders = box_client.list_experiment_folders()
+        folders = box_client.list_experiment_folders(include_nested=True)
     except Exception:
         logging.warning("could not list folders to purge references", exc_info=True)
         return
@@ -220,17 +388,33 @@ def purge_references(deleted_ids) -> None:
             continue  # itself deleted
         try:
             existing = box_client.get_folder_description(folder["id"])
-            current = parse_associations(existing)
-            kept = [
-                a
-                for a in current
-                if _folder_id_from_url(a.get("url")) not in deleted_ids
+            desc = existing
+            changed = False
+
+            # Associations pointing at a deleted folder.
+            assoc = parse_associations(desc)
+            kept = [a for a in assoc if _folder_id_from_url(a.get("url")) not in deleted_ids]
+            if len(kept) != len(assoc):
+                desc = set_associations_in_description(desc, kept)
+                changed = True
+
+            # Parent pointer at a deleted folder → this becomes an orphan.
+            parent = parse_parent(desc)
+            if parent and _folder_id_from_url(parent.get("url")) in deleted_ids:
+                desc = set_parent_in_description(desc, None)
+                changed = True
+
+            # Sub-experiment pointers at deleted children.
+            children = parse_children(desc)
+            kept_kids = [
+                c for c in children if _folder_id_from_url(c.get("url")) not in deleted_ids
             ]
-            if len(kept) == len(current):
-                continue  # nothing pointed at a deleted folder
-            box_client.set_folder_description(
-                folder["id"], set_associations_in_description(existing, kept)
-            )
+            if len(kept_kids) != len(children):
+                desc = set_children_in_description(desc, kept_kids)
+                changed = True
+
+            if changed:
+                box_client.set_folder_description(folder["id"], desc)
         except Exception:
             logging.warning(
                 "could not purge references from folder %s",
@@ -282,10 +466,9 @@ def classify_association(raw: str) -> dict:
         raise AssociationError(
             "Only Box folder links are supported (…box.com/folder/<id>)."
         )
-    if not (EXPERIMENT_NAME_RE.match(raw) or WORD_COMBO_RE.match(raw)):
+    if not (EXPERIMENT_NAME_RE.match(raw) or CODENAME_RE.match(raw)):
         raise AssociationError(
-            "Enter a word-word combo, a full experiment name, or a Box "
-            "folder link."
+            "Enter a codename, a full experiment name, or a Box folder link."
         )
     try:
         folder = box_client.find_experiment_folder(raw)
@@ -326,9 +509,19 @@ def resolve_association(raw: str) -> str:
     return f"<{lg['url']}|{lg['old_name']}>"
 
 
-def post_legacy_rename(post_message, user_id, renamed):
+def post_legacy_rename(post_message, user_id, renamed, created_by=""):
     """Announce a legacy-folder conversion to the channel. Called for every
-    rename, whether via /experiment legacy or the new-experiment dialog."""
+    rename, whether via /experiment legacy or the new-experiment dialog.
+
+    created_by is the name recorded in the CSV index for the person who
+    converted the folder (the folder may have had no prior row)."""
+    # Update the CSV index: the folder id is unchanged, so this refreshes its
+    # row (new name/date/category) and records original_name. Best-effort.
+    try:
+        csv_index.sync_renamed(renamed, renamed["old_name"], created_by=created_by)
+    except Exception:
+        logging.warning("could not sync legacy rename to the index", exc_info=True)
+
     directory = box_client.directory_info(renamed["dir_key"])
     post_message(
         text=(
@@ -409,22 +602,44 @@ def finish_new_experiment(
     user_id,
     post_message,
     update_ephemeral,
+    user_handle="",
+    action=None,
+    num_scans=None,
+    codename=None,
     associations=None,
-    suffix="",
+    created_by="",
 ):
-    """Generate the name, create the Box folder, and announce the result.
+    """Build the name, create the Box folder, and announce the result.
 
-    suffix is appended verbatim to the generated name: "-(3)" for a scan
-    count, "-codename" for a model codename.
+    The name follows the directory's scheme:
+      Experiments: YYYY-MM-DD-codename-CATEGORY-action-user
+      Scans:       YYYY-MM-DD-codename-CATEGORY-(num_scans)-user
+    `codename` is used when given (a user override), else a unique one is
+    generated; `action`/`num_scans` are the directory-specific segment;
+    `user_handle` is the creator's Slack handle placed in the name.
     associations is a list of {"label", "url", "mrkdwn"} dicts: they're
     persisted to the new folder's Box description (so `track` can list them)
     and rendered into the announcement.
-    post_message posts to the channel; update_ephemeral replaces the picker
-    prompt so it can't be reused.
+    created_by is the Slack handle recorded in the CSV index; "" when
+    unavailable. post_message posts to the channel; update_ephemeral replaces
+    the picker prompt so it can't be reused.
     """
     associations = associations or []
     directory = box_client.directory_info(dir_key)
-    experiment_name = generate_experiment_name(category) + suffix
+    code = sanitize_segment(codename) or generate_codename(exclude=_taken_codenames())
+    user_handle = sanitize_segment(user_handle)
+    action = sanitize_segment(action)
+    experiment_name = build_experiment_name(
+        dir_key, category, code, user_handle, action=action, num_scans=num_scans
+    )
+    # Exact per-segment columns for the index (no name-parsing ambiguity).
+    parts = {
+        "codename": code,
+        "category": category,
+        "action": action if dir_key != "scans" else "",
+        "num_scans": str(int(num_scans)) if dir_key == "scans" and num_scans else "",
+        "slack_user": user_handle,
+    }
     description = associations_to_description(associations)
 
     folder_note = ""
@@ -443,6 +658,19 @@ def finish_new_experiment(
     # Mirror the association onto each associated folder (bidirectional).
     if created and associations:
         add_back_references(created, associations)
+
+    # Record the new experiment in the CSV index — best-effort so an index
+    # hiccup never breaks the (already-announced) creation.
+    if created:
+        try:
+            csv_index.sync_created(
+                created,
+                created_by,
+                associated_with="; ".join(a["label"] for a in associations),
+                parts=parts,
+            )
+        except Exception:
+            logging.warning("could not sync new experiment to the index", exc_info=True)
 
     if associations:
         assoc_lines = "\n".join(f"  • {a['mrkdwn']}" for a in associations)
@@ -472,3 +700,171 @@ def finish_new_experiment(
             },
         ],
     )
+
+
+def finish_subexperiment(
+    parent,
+    category,
+    placement,
+    user_id,
+    post_message,
+    update_ephemeral,
+    user_handle="",
+    action=None,
+    codename=None,
+    on_date=None,
+    created_by="",
+    index=False,
+):
+    """Create a sub-experiment folder under `parent` and announce it.
+
+    `parent` is {"folder_id", "name", "url", "dir_key"} (resolved from the
+    pasted link). `placement` is "nested" (inside the parent's folder),
+    "experiments", or "scans" (top level of that directory). The name always
+    uses the action format `YYYY-MM-DD-codename-CATEGORY-action-user`, regardless
+    of placement; `category` is the (validated) inherited category. The
+    parent→child link is written on both sides: the child's description gets a
+    `Parent experiment:` section, the parent's gets a `Sub-experiments:` entry.
+
+    CSV indexing: a top-level placement is always indexed (it's a primary
+    experiment). A NESTED child is indexed only if `index` is True — otherwise
+    the parent's description is the record and the child stays out of the CSV.
+    """
+    code = sanitize_segment(codename) or generate_codename(exclude=_taken_codenames())
+    uh = sanitize_segment(user_handle)
+    act = sanitize_segment(action)
+    experiment_name = build_experiment_name(
+        "experiments", category, code, uh, action=act, on_date=on_date
+    )
+
+    if placement == "nested":
+        child_dir_key = parent.get("dir_key") or "experiments"
+        parent_folder_id = parent["folder_id"]
+    else:
+        child_dir_key = placement  # "experiments" or "scans"
+        parent_folder_id = None
+
+    directory = box_client.directory_info(child_dir_key)
+    parent_ref = {"label": parent["name"], "url": parent["url"]}
+    description = set_parent_in_description("", parent_ref)
+    parts = {
+        "codename": code,
+        "category": category,
+        "action": act,
+        "num_scans": "",
+        "slack_user": uh,
+        "parent_experiment": parent["name"],
+    }
+
+    folder_note = ""
+    created = None
+    try:
+        created = box_client.create_experiment_folder(
+            experiment_name,
+            child_dir_key,
+            description=description,
+            parent_folder_id=parent_folder_id,
+        )
+        folder_note = f"\n:file_folder: <{created['url']}|Open in Box>"
+    except BoxNotConfiguredError:
+        pass  # Box not set up: name announced without a folder link
+    except Exception as e:
+        logging.exception("Box folder creation failed for %s", experiment_name)
+        folder_note = f"\n:warning: Couldn't create the Box folder: {e}"
+
+    if created:
+        # Mirror the child onto the parent's Sub-experiments section (always —
+        # the link is the record even when we don't index the child).
+        add_child_reference(
+            parent["folder_id"], {"label": created["name"], "url": created["url"]}
+        )
+        # Index a top-level child always; a nested child only if opted in.
+        if placement != "nested" or index:
+            try:
+                csv_index.sync_created(created, created_by, parts=parts)
+            except Exception:
+                logging.warning(
+                    "could not sync sub-experiment to the index", exc_info=True
+                )
+
+    where = "Nested inside" if placement == "nested" else "Directory:"
+    update_ephemeral(f"Generated sub-experiment: {experiment_name}")
+    post_message(
+        text=(
+            f"New sub-experiment: {experiment_name} under {parent['name']} "
+            f"(started by <@{user_id}>)"
+        ),
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f":sparkles: New *sub-experiment* started by <@{user_id}>:\n"
+                        f"*`{experiment_name}`*\n"
+                        f":deciduous_tree: Parent: {_ref_mrkdwn(parent['name'], parent['url'])}\n"
+                        f":file_folder: {where} _{directory['label']}_"
+                        + folder_note
+                    ),
+                },
+            },
+        ],
+    )
+
+
+def pickup_legacy_children(
+    parent, children, index=False, created_by="", on_date="", category=""
+):
+    """Register existing subfolders of a just-converted legacy parent as
+    sub-experiments — LINK ONLY (the child folders keep their names).
+
+    `parent` is a convert_legacy_folder() result dict (id/name/url/dir_key).
+    `children` is a list of {id, name, url}; the caller has already filtered out
+    calibration folders and non-experiment items. For each child we write its
+    `Parent experiment:` description section and add it to the parent's
+    `Sub-experiments:` section (bidirectional). If `index` is True we also add a
+    CSV row (kept name; codename derived from the folder name; date/category
+    inherited from the parent). Returns the number of children linked. Best
+    effort per child."""
+    parent_ref = {"label": parent["name"], "url": parent["url"]}
+    linked = 0
+    for child in children:
+        try:
+            existing = box_client.get_folder_description(child["id"])
+            box_client.set_folder_description(
+                child["id"], set_parent_in_description(existing, parent_ref)
+            )
+        except Exception:
+            logging.warning(
+                "could not set parent on child folder %s", child["id"], exc_info=True
+            )
+            continue
+        add_child_reference(
+            parent["folder_id"], {"label": child["name"], "url": child["url"]}
+        )
+        linked += 1
+        if index:
+            try:
+                csv_index.sync_created(
+                    {
+                        "id": child["id"],
+                        "name": child["name"],
+                        "url": child["url"],
+                        "dir_key": parent["dir_key"],
+                    },
+                    created_by,
+                    parts={
+                        "codename": sanitize_segment(child["name"]),
+                        "category": category,
+                        "action": "",
+                        "num_scans": "",
+                        "slack_user": "",
+                        "parent_experiment": parent["name"],
+                        "created_date": on_date,
+                    },
+                )
+            except Exception:
+                logging.warning(
+                    "could not index child folder %s", child["id"], exc_info=True
+                )
+    return linked

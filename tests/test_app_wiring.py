@@ -72,19 +72,20 @@ def test_views_registered():
         "new_experiment_details",
         "legacy_experiment",
         "associate_legacy",
+        "subexperiment",
     }
 
 
 def test_new_flow_actions_registered():
+    from core.slack.naming import EXPERIMENT_CATEGORIES
+
     app = FakeApp()
     register(app)
+    category_actions = [f"pick_category_{c}" for c in EXPERIMENT_CATEGORIES]
     for action_id in [
-        "pick_category_bph",
-        "pick_category_cao",
+        *category_actions,
         "pick_directory_scans",
         "pick_directory_experiments",
-        "create_now",
-        "add_details",
     ]:
         assert _action_matches(app, action_id), action_id
 
@@ -92,6 +93,7 @@ def test_new_flow_actions_registered():
 def test_all_subcommands_present():
     assert set(SUBCOMMANDS) == {
         "new",
+        "subexperiment",
         "track",
         "date",
         "delete",
@@ -99,6 +101,8 @@ def test_all_subcommands_present():
         "scans",
         "experiments",
         "legacy",
+        "database",
+        "help",
     }
 
 
@@ -136,9 +140,12 @@ def test_associate_legacy_submit_clears_stack_and_creates_once(monkeypatch):
     meta = {
         "value": "bph:experiments",
         "user": "U1",
+        "user_name": "iven.chen",
         "channel": "C1",
         "response_url": "http://example.invalid/hook",
-        "suffix": "",
+        "codename": "",
+        "action": "segmentation",
+        "num_scans": None,
         "ready": [],
         "legacy": [
             {
@@ -179,3 +186,172 @@ def test_main_module_imports(monkeypatch):
 
     importlib.reload(main)
     assert main.app is not None
+
+
+def test_subexperiment_submit_creates_and_links(monkeypatch):
+    """Submitting the sub-experiment dialog creates the child folder (nested
+    under the parent) and writes the parent->child link both ways."""
+    app = FakeApp()
+    register(app)
+    submit = app.views["subexperiment"]
+
+    monkeypatch.setattr(
+        handlers_mod,
+        "WebhookClient",
+        lambda url: type("W", (), {"send": lambda self, **k: None})(),
+    )
+    monkeypatch.setattr(
+        box_client, "directory_info", lambda k: {"label": k.capitalize(), "path": None}
+    )
+    # parent link resolves to a top-level Experiments folder named to the scheme
+    monkeypatch.setattr(
+        box_client,
+        "get_folder_info",
+        lambda fid: {"name": "2026-07-06-decorous-harbor-BPH-seg-iven.chen", "parent_id": "DIR"},
+    )
+    monkeypatch.setattr(
+        box_client, "directory_key_for_parent", lambda pid: "experiments" if pid == "DIR" else None
+    )
+    created = []
+
+    def fake_create(name, dir_key, description="", parent_folder_id=None):
+        created.append((name, parent_folder_id))
+        return {"id": "CHILD", "name": name, "url": "https://app.box.com/folder/CHILD"}
+
+    monkeypatch.setattr(box_client, "create_experiment_folder", fake_create)
+    store = {"5": ""}
+    monkeypatch.setattr(box_client, "get_folder_description", lambda fid: store.get(fid, ""))
+    monkeypatch.setattr(box_client, "set_folder_description", store.__setitem__)
+
+    client = type("C", (), {"chat_postMessage": lambda self, **kw: None})()
+    acks = []
+    meta = {
+        "user": "U1",
+        "user_name": "jane.doe",
+        "channel": "C1",
+        "response_url": "http://example.invalid/hook",
+    }
+    view = {
+        "private_metadata": json.dumps(meta),
+        "state": {
+            "values": {
+                "parent_link": {"link_input": {"value": "https://app.box.com/folder/5"}},
+                "codename": {"codename_input": {"value": "myco"}},
+                "date": {"date_input": {"selected_date": "2026-08-01"}},  # later than parent
+                "action": {"action_input": {"value": "ablation"}},
+                "placement": {"placement_input": {"selected_option": {"value": "nested"}}},
+            }
+        },
+    }
+    submit(ack=lambda **kw: acks.append(kw), view=view, client=client)
+
+    assert acks == [{}]  # success ack (no response_action)
+    assert len(created) == 1
+    name, parent_folder_id = created[0]
+    assert parent_folder_id == "5"  # nested under the parent folder
+    # date is the child's own (later); category inherited from the parent (BPH)
+    assert name == "2026-08-01-myco-BPH-ablation-jane.doe"
+    # the parent folder got a Sub-experiments back-reference to the child
+    assert "Sub-experiments:" in store["5"]
+    assert "CHILD" in store["5"]
+
+
+def test_subexperiment_submit_refuses_uncategorized_parent(monkeypatch):
+    # The child inherits the parent's category — there's no category field. If
+    # the parent's category can't be read, we refuse (can't guarantee a match).
+    app = FakeApp()
+    register(app)
+    submit = app.views["subexperiment"]
+    monkeypatch.setattr(
+        box_client,
+        "get_folder_info",
+        lambda fid: {"name": "20260623_PerceptionTuesday", "parent_id": "DIR"},  # no category
+    )
+    monkeypatch.setattr(
+        box_client, "directory_key_for_parent", lambda pid: "experiments" if pid == "DIR" else None
+    )
+    acks = []
+    meta = {"user": "U1", "user_name": "jane.doe", "channel": "C1", "response_url": ""}
+    view = {
+        "private_metadata": json.dumps(meta),
+        "state": {
+            "values": {
+                "parent_link": {"link_input": {"value": "https://app.box.com/folder/5"}},
+                "codename": {"codename_input": {"value": ""}},
+                "date": {"date_input": {}},
+                "action": {"action_input": {"value": "ablation"}},
+                "placement": {"placement_input": {"selected_option": {"value": "nested"}}},
+            }
+        },
+    }
+    submit(ack=lambda **kw: acks.append(kw), view=view, client=None)
+    assert acks[-1]["response_action"] == "errors"
+    assert "parent_link" in acks[-1]["errors"]
+
+
+def test_legacy_submit_picks_up_children_skipping_calibration(monkeypatch):
+    """Legacy convert with 'register children' checked links the non-calibration
+    subfolders as sub-experiments of the renamed parent."""
+    from core.slack.experiments import parse_children, parse_parent
+
+    app = FakeApp()
+    register(app)
+    submit = app.views["legacy_experiment"]
+
+    monkeypatch.setattr(
+        box_client, "directory_info", lambda k: {"label": "Experiments", "path": None}
+    )
+    monkeypatch.setattr(
+        box_client,
+        "get_folder_info",
+        lambda fid: {"name": "20260623_PerceptionTuesday", "parent_id": "DIR"},
+    )
+    monkeypatch.setattr(
+        box_client, "directory_key_for_parent", lambda pid: "experiments" if pid == "DIR" else None
+    )
+    monkeypatch.setattr(
+        box_client,
+        "rename_folder",
+        lambda fid, new: {"id": fid, "name": new, "url": f"https://app.box.com/folder/{fid}"},
+    )
+    monkeypatch.setattr(
+        box_client,
+        "list_child_folders",
+        lambda pid: [
+            {"id": "501", "name": "Underwater_1", "url": "https://app.box.com/folder/501"},
+            {"id": "777", "name": "calibration", "url": "https://app.box.com/folder/777"},
+            {"id": "502", "name": "On_Air_long", "url": "https://app.box.com/folder/502"},
+        ],
+    )
+    store = {"501": "", "502": "", "777": "", "900": ""}
+    monkeypatch.setattr(box_client, "get_folder_description", lambda fid: store.get(fid, ""))
+    monkeypatch.setattr(box_client, "set_folder_description", store.__setitem__)
+
+    posts = []
+    client = type("C", (), {"chat_postMessage": lambda self, **kw: posts.append(kw)})()
+    acks = []
+    meta = {"user": "U1", "user_name": "iven.chen", "channel": "C1"}
+    view = {
+        "private_metadata": json.dumps(meta),
+        "state": {
+            "values": {
+                "link": {"link_input": {"value": "https://app.box.com/folder/900"}},
+                "date": {"date_input": {"selected_date": "2026-06-23"}},
+                "category": {"category_input": {"selected_option": {"value": "bph"}}},
+                "action": {"action_input": {"value": "perception"}},
+                "scan_count": {"count_input": {}},
+                "register_children": {"register": {"selected_options": [{"value": "yes"}]}},
+                "index_children": {"index": {"selected_options": []}},
+            }
+        },
+    }
+    submit(ack=lambda **kw: acks.append(kw), view=view, client=client)
+
+    # non-calibration children linked back to the renamed parent
+    assert parse_parent(store["501"]) is not None
+    assert parse_parent(store["502"]) is not None
+    assert parse_parent(store["777"]) is None  # calibration skipped
+    # renamed parent (folder 900) lists exactly the two real children
+    assert {c["label"] for c in parse_children(store["900"])} == {"Underwater_1", "On_Air_long"}
+    # a follow-up message reports the count
+    assert any("Linked 2" in (p.get("text") or "") for p in posts)

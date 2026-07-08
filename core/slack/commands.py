@@ -7,39 +7,50 @@ word to its handler; the Bolt command handler in handlers.py dispatches
 through it.
 """
 
+import logging
 from datetime import date
 
-from core.box import box_client
+from core.box import box_client, csv_index
 from core.box.box_client import AmbiguousExperimentError, BoxNotConfiguredError
 from core.slack.naming import (
-    BOX_FOLDER_LINK_RE,
     CODENAME_RE,
     EXPERIMENT_CATEGORIES,
     EXPERIMENT_NAME_RE,
-    WORD_COMBO_RE,
-    extract_codename,
 )
 from core.slack.experiments import (
     parse_associations,
+    parse_children,
+    parse_parent,
     post_delete,
     post_prune,
     purge_references,
 )
 from core.slack.views import (
     BOX_NOT_READY,
+    HELP,
     category_buttons,
     format_experiment_list,
     legacy_modal_view,
+    subexperiment_modal_view,
 )
 
 
-def _read_associations(folder_id):
-    """Parse the associations stored on a folder's Box description, tolerating
-    an unreadable/unconfigured folder (returns [])."""
+def _sync_deleted(folder_ids):
+    """Drop the CSV index rows for deleted folders — best-effort so an index
+    hiccup never breaks the (already-completed) deletion."""
     try:
-        return parse_associations(box_client.get_folder_description(folder_id))
+        csv_index.sync_deleted(folder_ids)
     except Exception:
-        return []
+        logging.warning("could not sync deletion to the index", exc_info=True)
+
+
+def _read_description(folder_id):
+    """A folder's Box description, tolerating an unreadable/unconfigured folder
+    (returns "")."""
+    try:
+        return box_client.get_folder_description(folder_id)
+    except Exception:
+        return ""
 
 
 def cmd_new(respond, arg, **_):
@@ -64,32 +75,46 @@ def cmd_new(respond, arg, **_):
     )
 
 
+def cmd_subexperiment(respond, arg, client=None, body=None, **_):
+    """Open the sub-experiment dialog to create an experiment under a parent.
+
+    If arg already looks like a Box link
+    (/experiment subexperiment <link>), it pre-fills the parent-link field.
+    """
+    meta = {
+        "user": body["user_id"],
+        "user_name": body.get("user_name", ""),
+        "channel": body["channel_id"],
+        "response_url": body.get("response_url", ""),
+    }
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view=subexperiment_modal_view(meta, arg),
+    )
+    respond(
+        response_type="ephemeral",
+        text=":writing_hand: Fill in the sub-experiment details in the dialog.",
+    )
+
+
 def cmd_track(respond, arg, **_):
     """Find an experiment's Box folder and link to it.
 
-    Accepts the full name (2026-07-04-bph-decorous-harbor), the word-word
-    combo (decorous-harbor), or a codename (the model label appended to an
-    Experiments-directory name). Names/combos resolve to a single folder
-    (combos are unique); a codename may be shared by several experiments, in
-    which case all of them are listed.
+    Accepts a full name (2026-07-06-decorous-harbor-BPH-seg-iven.chen) or a
+    bare codename (decorous-harbor). The codename is the unique lookup key, so
+    it normally resolves to a single folder; if several folders share it, they
+    are listed as candidates.
     """
     if not arg:
-        respond(
-            text="Usage: `/experiment track <experiment-name | word-word | codename>`"
-        )
+        respond(text="Usage: `/experiment track <experiment-name | codename>`")
         return
-    is_name_or_combo = EXPERIMENT_NAME_RE.match(arg) or WORD_COMBO_RE.match(arg)
-    if not (is_name_or_combo or CODENAME_RE.match(arg)):
+    if not (EXPERIMENT_NAME_RE.match(arg) or CODENAME_RE.match(arg)):
         respond(
             text=f"`{arg}` doesn't look like an experiment name "
-            "(expected `YYYY-MM-DD-category-word-word`, a `word-word` combo, "
-            "or a codename)."
+            "(expected `YYYY-MM-DD-codename-CATEGORY-…` or a bare `codename`)."
         )
         return
-    if is_name_or_combo:
-        _track_single(respond, arg)
-    else:
-        _track_by_codename(respond, arg)
+    _track_single(respond, arg)
 
 
 def _render_experiment_detail(respond, label, folder):
@@ -100,13 +125,25 @@ def _render_experiment_detail(respond, label, folder):
         f"• Location: `{folder['path']}`",
         f"• <{folder['url']}|Open in Box>",
     ]
-    # Associated experiments are stored in the folder's Box description.
-    associations = _read_associations(folder["id"])
+    # Relationships live in the folder's Box description (source of truth).
+    desc = _read_description(folder["id"])
+
+    def _ref(entry):
+        return f"<{entry['url']}|{entry['label']}>" if entry.get("url") else f"`{entry['label']}`"
+
+    parent = parse_parent(desc)
+    if parent:
+        lines.append(f"• Parent experiment: {_ref(parent)}")
+    children = parse_children(desc)
+    if children:
+        lines.append("• Sub-experiments:")
+        for c in children:
+            lines.append(f"    ◦ {_ref(c)}")
+    associations = parse_associations(desc)
     if associations:
         lines.append("• Associated experiments:")
         for a in associations:
-            ref = f"<{a['url']}|{a['label']}>" if a["url"] else f"`{a['label']}`"
-            lines.append(f"    ◦ {ref}")
+            lines.append(f"    ◦ {_ref(a)}")
     respond(text="\n".join(lines))
 
 
@@ -127,30 +164,6 @@ def _track_single(respond, arg):
         respond(text=f":mag: No Box folder found for `{arg}`.")
         return
     _render_experiment_detail(respond, arg, folder)
-
-
-def _track_by_codename(respond, arg):
-    """Track by codename. Codenames aren't unique: one match renders in full,
-    several are listed. Codenames only exist in the Experiments directory
-    (Scans names carry a scan-count suffix instead), so scope the crawl there
-    and filter through extract_codename so scan-count/combo-only names never
-    match."""
-    try:
-        folders = box_client.list_experiments_by_category(dir_key="experiments")
-    except BoxNotConfiguredError:
-        respond(text=BOX_NOT_READY)
-        return
-    matches = [f for f in folders if extract_codename(f["name"]) == arg]
-    if not matches:
-        respond(text=f":mag: No experiment found with name or codename `{arg}`.")
-        return
-    if len(matches) == 1:
-        _render_experiment_detail(respond, arg, matches[0])
-        return
-    respond(
-        text=f"*{len(matches)} experiments use codename `{arg}`:*\n"
-        + format_experiment_list(matches)
-    )
 
 
 def cmd_date(respond, arg, **_):
@@ -215,6 +228,7 @@ def cmd_delete(respond, arg, say=None, body=None, **_):
     box_client.delete_experiment_folder(folder["id"])
     # Strip any association pointing at this now-deleted folder (both dirs).
     purge_references({folder["id"]})
+    _sync_deleted({folder["id"]})
     post_delete(say, body["user_id"], folder)
 
 
@@ -222,7 +236,7 @@ def prune_empty_experiments(respond, say=None, body=None):
     """Delete every experiment folder (in both Box directories) that contains
     no files, and announce the prune to the channel."""
     try:
-        folders = box_client.list_experiment_folders()
+        folders = box_client.list_experiment_folders(include_nested=True)
         deleted = []
         for folder in folders:
             if not box_client.folder_has_files(folder["id"]):
@@ -236,6 +250,7 @@ def prune_empty_experiments(respond, say=None, body=None):
         return
     # One crawl strips references to every folder we just pruned.
     purge_references({f["id"] for f in deleted})
+    _sync_deleted({f["id"] for f in deleted})
     post_prune(say, body["user_id"], deleted)
 
 
@@ -303,7 +318,11 @@ def cmd_legacy(respond, arg, client=None, body=None, **_):
     If arg already looks like a Box link (/experiment legacy <link>), it
     pre-fills the link field.
     """
-    meta = {"user": body["user_id"], "channel": body["channel_id"]}
+    meta = {
+        "user": body["user_id"],
+        "user_name": body.get("user_name", ""),
+        "channel": body["channel_id"],
+    }
     client.views_open(
         trigger_id=body["trigger_id"],
         view=legacy_modal_view(meta, arg),
@@ -314,8 +333,52 @@ def cmd_legacy(respond, arg, client=None, body=None, **_):
     )
 
 
+def cmd_database(respond, arg, **_):
+    """Inspect or refresh the experiment_index.csv "database".
+
+    `retrieve` returns a link to the CSV so a human can review it (creating +
+    backfilling it first if it doesn't exist yet). `update` fully reconciles
+    the CSV against a live crawl of both directories (adds new folders,
+    refreshes changed rows, drops folders that no longer exist).
+    """
+    action = arg.strip().lower()
+    if action == "retrieve":
+        try:
+            url = csv_index.index_link()
+        except BoxNotConfiguredError:
+            respond(text=BOX_NOT_READY)
+            return
+        respond(
+            text=f":card_index_dividers: Experiment index: "
+            f"<{url}|{csv_index.INDEX_CSV_NAME}> "
+            f"(in _{csv_index.INDEX_FOLDER_NAME}_)."
+        )
+    elif action == "update":
+        try:
+            summary = csv_index.rebuild()
+        except BoxNotConfiguredError:
+            respond(text=BOX_NOT_READY)
+            return
+        respond(
+            text=(
+                f":card_index_dividers: Index updated — "
+                f"{summary['added']} added, {summary['updated']} refreshed, "
+                f"{summary['removed']} removed ({summary['total']} total).\n"
+                f"<{summary['url']}|{csv_index.INDEX_CSV_NAME}>"
+            )
+        )
+    else:
+        respond(text="Usage: `/experiment database <retrieve | update>`")
+
+
+def cmd_help(respond, arg, **_):
+    """Show the full command guide (the long-form counterpart to USAGE)."""
+    respond(text=HELP)
+
+
 SUBCOMMANDS = {
     "new": cmd_new,
+    "subexperiment": cmd_subexperiment,
     "track": cmd_track,
     "date": cmd_date,
     "delete": cmd_delete,
@@ -323,4 +386,6 @@ SUBCOMMANDS = {
     "scans": cmd_scans,
     "experiments": cmd_experiments,
     "legacy": cmd_legacy,
+    "database": cmd_database,
+    "help": cmd_help,
 }

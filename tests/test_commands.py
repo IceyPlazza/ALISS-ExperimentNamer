@@ -3,14 +3,16 @@ box_client stubbed and a Recorder standing in for Slack's `respond`."""
 
 import pytest
 
-from core.box import box_client
+from core.box import box_client, csv_index
 from core.box.box_client import AmbiguousExperimentError, BoxNotConfiguredError
 from core.slack import commands
 from core.slack.commands import (
     cmd_category,
+    cmd_database,
     cmd_date,
     cmd_delete,
     cmd_experiments,
+    cmd_help,
     cmd_new,
     cmd_scans,
     cmd_track,
@@ -23,11 +25,13 @@ from core.slack.commands import (
 
 
 def test_cmd_new_shows_category_buttons(respond):
+    from core.slack.naming import EXPERIMENT_CATEGORIES
+
     cmd_new(respond, "")
     blocks = respond.kwargs["blocks"]
     actions = [b for b in blocks if b["type"] == "actions"][0]
     action_ids = {el["action_id"] for el in actions["elements"]}
-    assert action_ids == {"pick_category_bph", "pick_category_cao"}
+    assert action_ids == {f"pick_category_{c}" for c in EXPERIMENT_CATEGORIES}
 
 
 # --------------------------------------------------------------------------
@@ -133,70 +137,41 @@ def test_cmd_track_not_found(monkeypatch, respond):
     assert "No Box folder found" in respond.text
 
 
-# ---- track by codename (not a full name / word-word combo) --------------
+def test_cmd_track_codename_routes_through_find(monkeypatch, respond):
+    # A bare codename is now the unique lookup key — it resolves through
+    # find_experiment_folder just like a full name (no separate crawl).
+    seen = {}
 
-
-def _codename_folders(category=None, dir_key=None):
-    # Stands in for list_experiments_by_category(dir_key="experiments"): the
-    # codename crawl is scoped to the Experiments directory.
-    return [
-        {
-            "id": "1",
-            "name": "2026-07-05-cao-mad-polyphony-modelA",
-            "url": "https://app.box.com/folder/1",
-            "directory": "Experiments",
-            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-05-cao-mad-polyphony-modelA",
-        },
-        {
-            "id": "2",
-            "name": "2026-07-06-bph-glad-river-modelA",
-            "url": "https://app.box.com/folder/2",
-            "directory": "Experiments",
-            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-06-bph-glad-river-modelA",
-        },
-        {
+    def stub(name):
+        seen["arg"] = name
+        return {
             "id": "3",
-            "name": "2026-07-07-cao-wry-oak-solo",
+            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-07-wry-oak-CAO-solo-iven.chen",
             "url": "https://app.box.com/folder/3",
-            "directory": "Experiments",
-            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-07-cao-wry-oak-solo",
-        },
-        # no codename — must never match a codename query
-        {"id": "4", "name": "2026-07-08-bph-plain-combo", "url": "u", "directory": "Experiments", "path": "p"},
-    ]
+            "name": "2026-07-07-wry-oak-CAO-solo-iven.chen",
+        }
 
-
-def test_cmd_track_codename_single_shows_detail(monkeypatch, respond):
-    monkeypatch.setattr(box_client, "list_experiments_by_category", _codename_folders)
+    monkeypatch.setattr(box_client, "find_experiment_folder", stub)
     monkeypatch.setattr(box_client, "get_folder_description", lambda fid: "")
-    cmd_track(respond, "solo")  # single-token, not a combo
-    assert "2026-07-07-cao-wry-oak-solo" in respond.text  # full path/detail view
+    cmd_track(respond, "wry-oak")
+    assert seen["arg"] == "wry-oak"
+    assert "2026-07-07-wry-oak-CAO-solo-iven.chen" in respond.text
     assert "app.box.com/folder/3" in respond.text
-    assert "use codename" not in respond.text  # not the multi-match listing
 
 
-def test_cmd_track_codename_duplicated_lists_all(monkeypatch, respond):
-    monkeypatch.setattr(box_client, "list_experiments_by_category", _codename_folders)
-    cmd_track(respond, "modelA")
-    assert "2 experiments use codename `modelA`" in respond.text
-    assert "2026-07-05-cao-mad-polyphony-modelA" in respond.text
-    assert "2026-07-06-bph-glad-river-modelA" in respond.text
-    assert "2026-07-07-cao-wry-oak-solo" not in respond.text  # different codename
+def test_cmd_track_codename_ambiguous_lists_candidates(monkeypatch, respond):
+    def ambiguous(name):
+        raise AmbiguousExperimentError(
+            [
+                "2026-07-05-glad-river-CAO-a-iven.chen",
+                "2026-07-06-glad-river-BPH-b-jane.doe",
+            ]
+        )
 
-
-def test_cmd_track_codename_not_found(monkeypatch, respond):
-    monkeypatch.setattr(box_client, "list_experiments_by_category", _codename_folders)
-    cmd_track(respond, "nomatch")
-    assert "No experiment found with name or codename" in respond.text
-
-
-def test_cmd_track_codename_box_not_configured(monkeypatch, respond):
-    def unconfigured(category=None, dir_key=None):
-        raise BoxNotConfiguredError("nope")
-
-    monkeypatch.setattr(box_client, "list_experiments_by_category", unconfigured)
-    cmd_track(respond, "modelA")
-    assert "isn't connected" in respond.text
+    monkeypatch.setattr(box_client, "find_experiment_folder", ambiguous)
+    cmd_track(respond, "glad-river")
+    assert "more than one" in respond.text
+    assert "2026-07-05-glad-river-CAO-a-iven.chen" in respond.text
 
 
 # --------------------------------------------------------------------------
@@ -357,7 +332,7 @@ def test_cmd_delete_empty_keyword_prunes_and_announces(monkeypatch, respond, say
         {"id": "1", "name": "empty-one", "directory": "Scans"},
         {"id": "2", "name": "has-files", "directory": "Scans"},
     ]
-    monkeypatch.setattr(box_client, "list_experiment_folders", lambda: folders)
+    monkeypatch.setattr(box_client, "list_experiment_folders", lambda **_k: folders)
     monkeypatch.setattr(box_client, "folder_has_files", lambda fid: fid == "2")
     deleted = []
     monkeypatch.setattr(box_client, "delete_experiment_folder", lambda fid: deleted.append(fid))
@@ -388,7 +363,7 @@ def test_cmd_delete_purges_references(monkeypatch, respond, say):
     monkeypatch.setattr(box_client, "folder_has_files", lambda fid: False)
     monkeypatch.setattr(box_client, "delete_experiment_folder", lambda fid: store.pop(fid, None))
     # after delete, the crawl sees the remaining folder(s)
-    monkeypatch.setattr(box_client, "list_experiment_folders", lambda: [{"id": "5"}])
+    monkeypatch.setattr(box_client, "list_experiment_folders", lambda **_k: [{"id": "5"}])
     monkeypatch.setattr(box_client, "get_folder_description", lambda fid: store.get(fid, ""))
     monkeypatch.setattr(box_client, "set_folder_description", store.__setitem__)
     cmd_delete(respond, "2026-07-05-bph-x", say=say, body={"user_id": "U1"})
@@ -398,7 +373,148 @@ def test_cmd_delete_purges_references(monkeypatch, respond, say):
 
 
 def test_cmd_delete_empty_keyword_nothing_to_prune(monkeypatch, respond, say):
-    monkeypatch.setattr(box_client, "list_experiment_folders", lambda: [])
+    monkeypatch.setattr(box_client, "list_experiment_folders", lambda **_k: [])
     cmd_delete(respond, "empty", say=say, body={"user_id": "U1"})
     assert "nothing to prune" in respond.text.lower()
     assert len(say) == 0  # nothing pruned → no channel noise
+
+
+# --------------------------------------------------------------------------
+# cmd_help
+# --------------------------------------------------------------------------
+
+
+def test_cmd_help_covers_every_subcommand(respond):
+    from core.slack.commands import SUBCOMMANDS
+
+    cmd_help(respond, "")
+    text = respond.text
+    # the guide names every subcommand (except help/usage themselves are meta)
+    for sub in SUBCOMMANDS:
+        if sub == "help":
+            continue
+        assert f"/experiment {sub}" in text, sub
+
+
+def test_cmd_help_ignores_extra_args(respond):
+    cmd_help(respond, "anything here")
+    assert "full guide" in respond.text.lower()
+
+
+# --------------------------------------------------------------------------
+# cmd_database
+# --------------------------------------------------------------------------
+
+
+def test_cmd_database_no_arg_shows_usage(respond):
+    cmd_database(respond, "")
+    assert "Usage" in respond.text
+    assert "retrieve" in respond.text and "update" in respond.text
+
+
+def test_cmd_database_unknown_arg_shows_usage(respond):
+    cmd_database(respond, "frobnicate")
+    assert "Usage" in respond.text
+
+
+def test_cmd_database_retrieve_returns_link(monkeypatch, respond):
+    monkeypatch.setattr(csv_index, "index_link", lambda: "https://app.box.com/file/77")
+    cmd_database(respond, "retrieve")
+    assert "app.box.com/file/77" in respond.text
+    assert csv_index.INDEX_CSV_NAME in respond.text
+
+
+def test_cmd_database_retrieve_box_not_configured(monkeypatch, respond):
+    def unconfigured():
+        raise BoxNotConfiguredError("nope")
+
+    monkeypatch.setattr(csv_index, "index_link", unconfigured)
+    cmd_database(respond, "retrieve")
+    assert "isn't connected" in respond.text
+
+
+def test_cmd_database_update_reports_summary(monkeypatch, respond):
+    monkeypatch.setattr(
+        csv_index,
+        "rebuild",
+        lambda: {
+            "added": 2,
+            "removed": 1,
+            "updated": 3,
+            "total": 10,
+            "url": "https://app.box.com/file/77",
+        },
+    )
+    cmd_database(respond, "update")
+    assert "2 added" in respond.text
+    assert "3 refreshed" in respond.text
+    assert "1 removed" in respond.text
+    assert "10 total" in respond.text
+    assert "app.box.com/file/77" in respond.text
+
+
+def test_cmd_database_update_box_not_configured(monkeypatch, respond):
+    def unconfigured():
+        raise BoxNotConfiguredError("nope")
+
+    monkeypatch.setattr(csv_index, "rebuild", unconfigured)
+    cmd_database(respond, "update")
+    assert "isn't connected" in respond.text
+
+
+# --------------------------------------------------------------------------
+# cmd_subexperiment + track parent/children
+# --------------------------------------------------------------------------
+
+
+def test_cmd_subexperiment_opens_prefilled_modal(respond):
+    from core.slack.commands import cmd_subexperiment
+
+    opened = {}
+
+    class FakeClient:
+        def views_open(self, trigger_id, view):
+            opened["trigger_id"] = trigger_id
+            opened["view"] = view
+
+    body = {
+        "user_id": "U1",
+        "user_name": "iven.chen",
+        "channel_id": "C1",
+        "trigger_id": "T1",
+        "response_url": "http://example.invalid/hook",
+    }
+    cmd_subexperiment(respond, "https://app.box.com/folder/5", client=FakeClient(), body=body)
+    assert opened["view"]["callback_id"] == "subexperiment"
+    link_block = [b for b in opened["view"]["blocks"] if b.get("block_id") == "parent_link"][0]
+    assert link_block["element"]["initial_value"] == "https://app.box.com/folder/5"
+    assert "dialog" in respond.text
+
+
+def test_cmd_track_shows_parent_and_children(monkeypatch, respond):
+    monkeypatch.setattr(
+        box_client,
+        "find_experiment_folder",
+        lambda name: {
+            "id": "9",
+            "path": "\\Box\\ARPA-H\\Experiments\\2026-07-06-a-b-BPH-x-iven.chen",
+            "url": "u",
+            "name": "2026-07-06-a-b-BPH-x-iven.chen",
+        },
+    )
+    monkeypatch.setattr(
+        box_client,
+        "get_folder_description",
+        lambda fid: (
+            "Parent experiment:\n"
+            "- 2026-07-05-p-q-BPH-y-iven.chen | https://app.box.com/folder/1\n\n"
+            "Sub-experiments:\n"
+            "- 2026-07-07-c-d-BPH-z-jane.doe | https://app.box.com/folder/2"
+        ),
+    )
+    cmd_track(respond, "a-b")
+    text = respond.text
+    assert "Parent experiment:" in text
+    assert "2026-07-05-p-q-BPH-y-iven.chen" in text
+    assert "Sub-experiments:" in text
+    assert "2026-07-07-c-d-BPH-z-jane.doe" in text

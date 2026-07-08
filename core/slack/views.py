@@ -15,7 +15,8 @@ from core.slack.naming import BOX_FOLDER_LINK_RE, EXPERIMENT_CATEGORIES
 USAGE = (
     "*Usage:* `/experiment <subcommand>`\n"
     "• `/experiment new` — generate a name for a new experiment\n"
-    "• `/experiment track <name | word-word | codename>` — find an experiment's Box folder\n"
+    "• `/experiment subexperiment [box-link]` — create an experiment under a parent experiment\n"
+    "• `/experiment track <name | codename>` — find an experiment's Box folder\n"
     "• `/experiment date <YYYY-MM-DD>` — list experiments from a date\n"
     "• `/experiment legacy [box-link]` — rename a legacy folder to the "
     "naming scheme\n"
@@ -23,7 +24,74 @@ USAGE = (
     "• `/experiment delete empty` — prune all experiments with no files\n"
     f"• `/experiment category <{'|'.join(EXPERIMENT_CATEGORIES)}>` — list experiments by category (both directories)\n"
     f"• `/experiment scans [{'|'.join(EXPERIMENT_CATEGORIES)}]` — list experiments in the Scans directory\n"
-    f"• `/experiment experiments [{'|'.join(EXPERIMENT_CATEGORIES)}]` — list experiments in the Experiments directory"
+    f"• `/experiment experiments [{'|'.join(EXPERIMENT_CATEGORIES)}]` — list experiments in the Experiments directory\n"
+    "• `/experiment database <retrieve|update>` — get a link to the experiment index CSV, or reconcile it against Box\n"
+    "• `/experiment help` — a full guide to every command"
+)
+
+HELP = (
+    ":test_tube: *ExperimentNamer — full guide*\n\n"
+    "This app generates and tracks experiment names in Box. Names are built "
+    "per directory:\n"
+    "• _Experiments_: `YYYY-MM-DD-codename-CATEGORY-action-user` — e.g. "
+    "`2026-07-06-decorous-harbor-BPH-segmentation-iven.chen`\n"
+    "• _Scans_: `YYYY-MM-DD-codename-CATEGORY-(n)-user` — e.g. "
+    "`2026-07-06-decorous-harbor-BPH-(3)-iven.chen`\n"
+    "The `codename` (an auto-generated, unique adjective-noun pair, or your own "
+    "override) is the lookup key; `user` is your Slack handle. "
+    f"Categories: {', '.join('`' + c + '`' for c in EXPERIMENT_CATEGORIES)} "
+    "(uppercased in the name). Experiments live in one of two Box directories — "
+    "the *Scans* directory (data collection & scans) and the *Experiments* "
+    "directory — and every command searches and labels both.\n\n"
+    "*Creating experiments*\n"
+    "• `/experiment new` — the guided flow: pick a category, pick a Box "
+    "directory, then fill in the details dialog:\n"
+    "    ◦ an optional *codename* (leave blank to auto-generate a unique one)\n"
+    "    ◦ _Scans_: the *number of scans* (required)\n"
+    "    ◦ _Experiments_: the *action* (required)\n"
+    "    ◦ optional *associated experiments*, one per line — a codename, a full "
+    "name, or a Box folder link. A link to a folder that isn't named to the "
+    "scheme yet can be renamed on the spot.\n"
+    "• `/experiment subexperiment [parent-link]` — create a *sub-experiment* "
+    "under a parent: paste the parent's Box link, optionally set a codename, "
+    "give an action + date, and choose where the folder goes — *nested inside "
+    "the parent* (default) or top-level in Experiments/Scans. It always inherits "
+    "the parent's *category*, but its *date* is independent (a sub-experiment "
+    "can be run later). The parent↔child link is recorded both ways.\n\n"
+    "*Finding experiments*\n"
+    "• `/experiment track <name | codename>` — locate a folder and get its full "
+    "path, a direct link, and any associated experiments. A codename normally "
+    "maps to one experiment; if several share it, all matches are listed.\n"
+    f"• `/experiment category <{'|'.join(EXPERIMENT_CATEGORIES)}>` — list every "
+    "experiment in a category, across both directories.\n"
+    f"• `/experiment scans [{'|'.join(EXPERIMENT_CATEGORIES)}]` — list the Scans "
+    "directory, optionally filtered to a category.\n"
+    f"• `/experiment experiments [{'|'.join(EXPERIMENT_CATEGORIES)}]` — same, for "
+    "the Experiments directory.\n"
+    "• `/experiment date <YYYY-MM-DD>` — list everything generated on a date.\n"
+    "    _In any listing, an experiment that has associated experiment(s) is "
+    "tagged with :link:._\n\n"
+    "*Managing experiments*\n"
+    "• `/experiment delete <name>` — delete an experiment's Box folder, but only "
+    "if it's empty; a folder with files is linked for review instead. "
+    "Deletions are announced to the channel.\n"
+    "• `/experiment delete empty` — prune every empty experiment folder in both "
+    "directories at once.\n"
+    "• `/experiment legacy [box-link]` — rename an old, non-scheme folder to the "
+    "naming scheme. Date and category are auto-detected from the old name when "
+    "possible; you supply the action (Experiments) or scan count (Scans), and "
+    "your Slack handle fills the `user` segment. If the folder holds subfolders, "
+    "tick *Register sub-experiments* to link them (keeping their names, skipping "
+    "any `calibration` folder); they stay out of the index unless you also tick "
+    "*Index sub-experiments*.\n\n"
+    "*The index (spreadsheet database)*\n"
+    "• `/experiment database retrieve` — a link to `experiment_index.csv`, a "
+    "spreadsheet mirror of every experiment (kept in a `.experiment-namer` "
+    "folder in Box) you can open and read.\n"
+    "• `/experiment database update` — reconcile that CSV against Box (add new "
+    "folders, refresh renamed ones, drop deleted ones). The index also updates "
+    "automatically as you create / delete / convert, so you rarely need this.\n\n"
+    "_Tip: `/experiment` with no subcommand shows a short usage summary._"
 )
 
 BOX_NOT_READY = (
@@ -60,11 +128,20 @@ def directory_buttons(category: str) -> list:
 
 
 def format_experiment_list(experiments: list[dict]) -> str:
-    """Render [{'name', 'url', 'directory'}] as a Slack mrkdwn bullet list,
-    noting which Box directory each experiment lives in."""
-    return "\n".join(
-        f"• <{e['url']}|{e['name']}> — _{e['directory']}_" for e in experiments
-    )
+    """Render [{'name', 'url', 'directory'[, 'associated_with']}] as a Slack
+    mrkdwn bullet list, noting which Box directory each experiment lives in and
+    flagging any that have associated experiment(s)."""
+    lines = []
+    for e in experiments:
+        line = f"• <{e['url']}|{e['name']}> — _{e['directory']}_"
+        if e.get("associated_with"):
+            line += " · :link: has associated experiment(s)"
+        if e.get("has_parent"):
+            line += " · :deciduous_tree: sub-experiment"
+        if e.get("has_children"):
+            line += " · :seedling: has sub-experiment(s)"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _category_select_options() -> list:
@@ -133,22 +210,113 @@ def legacy_modal_view(meta: dict, prefill_link: str = "") -> dict:
                     "options": _category_select_options(),
                 },
             },
+            {
+                "type": "input",
+                "block_id": "action",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Action"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Required if the folder is in the Experiments "
+                    "directory (e.g. segmentation).",
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "action_input",
+                    "placeholder": {"type": "plain_text", "text": "e.g. segmentation"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "scan_count",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Number of scans"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Required if the folder is in the Scans directory.",
+                },
+                "element": {
+                    "type": "number_input",
+                    "action_id": "count_input",
+                    "is_decimal_allowed": False,
+                    "min_value": "1",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "register_children",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Sub-experiments inside"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "register",
+                    "options": [
+                        {
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Register the subfolders as sub-experiments "
+                                "(skips any 'calibration' folder)",
+                            },
+                            "value": "yes",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "index_children",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Index sub-experiments"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "index",
+                    "options": [
+                        {
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Also add those sub-experiments to the index "
+                                "CSV (off by default)",
+                            },
+                            "value": "yes",
+                        }
+                    ],
+                },
+            },
         ],
     }
 
 
-def _details_extra_block(dir_key: str) -> dict:
-    """The directory-specific suffix input: scan count (scans) or codename
-    (experiments)."""
+def _codename_block() -> dict:
+    """Optional codename override; blank means auto-generate a unique one."""
+    return {
+        "type": "input",
+        "block_id": "codename",
+        "optional": True,
+        "label": {"type": "plain_text", "text": "Codename"},
+        "hint": {
+            "type": "plain_text",
+            "text": "Leave blank to auto-generate a unique adjective-noun "
+            "codename (e.g. decorous-harbor).",
+        },
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "codename_input",
+            "placeholder": {"type": "plain_text", "text": "e.g. decorous-harbor"},
+        },
+    }
+
+
+def _required_detail_block(dir_key: str) -> dict:
+    """The directory-specific REQUIRED input: number of scans (scans) or the
+    action (experiments)."""
     if dir_key == "scans":
         return {
             "type": "input",
             "block_id": "scan_count",
-            "optional": True,
             "label": {"type": "plain_text", "text": "Number of scans"},
             "hint": {
                 "type": "plain_text",
-                "text": "Appended to the name as …-word-word-(n).",
+                "text": "Required. Goes into the name as …-CATEGORY-(n)-user.",
             },
             "element": {
                 "type": "number_input",
@@ -159,31 +327,30 @@ def _details_extra_block(dir_key: str) -> dict:
         }
     return {
         "type": "input",
-        "block_id": "codename",
-        "optional": True,
-        "label": {"type": "plain_text", "text": "Codename"},
+        "block_id": "action",
+        "label": {"type": "plain_text", "text": "Action"},
         "hint": {
             "type": "plain_text",
-            "text": "e.g. a model label; appended to the name as "
-            "…-word-word-codename.",
+            "text": "Required. What you're doing; goes into the name as "
+            "…-CATEGORY-action-user.",
         },
         "element": {
             "type": "plain_text_input",
-            "action_id": "codename_input",
-            "placeholder": {"type": "plain_text", "text": "e.g. modelA"},
+            "action_id": "action_input",
+            "placeholder": {"type": "plain_text", "text": "e.g. segmentation"},
         },
     }
 
 
 def details_modal_view(meta: dict, dir_key: str) -> dict:
-    """The `new_experiment_details` modal for the "Add details…" flow:
-    directory-specific suffix + optional association(s).
+    """The `new_experiment_details` modal for `/experiment new`: an optional
+    codename override, the directory-specific required segment (action or scan
+    count), and optional association(s).
 
     The association field is multiline — one entry per line — and accepts
-    word-word combos, full experiment names, or Box folder links. If a link
-    points at a folder that isn't named to the scheme, submitting pushes the
-    `associate_legacy` modal to handle it (rename or keep); there are no
-    inline legacy-rename fields here anymore."""
+    codenames, full experiment names, or Box folder links. If a link points at
+    a folder that isn't named to the scheme, submitting pushes the
+    `associate_legacy` modal to handle it (rename or keep)."""
     return {
         "type": "modal",
         "callback_id": "new_experiment_details",
@@ -192,7 +359,8 @@ def details_modal_view(meta: dict, dir_key: str) -> dict:
         "submit": {"type": "plain_text", "text": "Create"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
-            _details_extra_block(dir_key),
+            _codename_block(),
+            _required_detail_block(dir_key),
             {
                 "type": "input",
                 "block_id": "assoc",
@@ -203,8 +371,8 @@ def details_modal_view(meta: dict, dir_key: str) -> dict:
                 },
                 "hint": {
                     "type": "plain_text",
-                    "text": "One per line. Each can be a word-word combo, a "
-                    "full experiment name, or a Box folder link.",
+                    "text": "One per line. Each can be a codename, a full "
+                    "experiment name, or a Box folder link.",
                 },
                 "element": {
                     "type": "plain_text_input",
@@ -212,7 +380,7 @@ def details_modal_view(meta: dict, dir_key: str) -> dict:
                     "multiline": True,
                     "placeholder": {
                         "type": "plain_text",
-                        "text": "e.g. coolly-cut\nhttps://…box.com/folder/123",
+                        "text": "e.g. decorous-harbor\nhttps://…box.com/folder/123",
                     },
                 },
             },
@@ -319,9 +487,45 @@ def associate_legacy_view(meta: dict, legacy_entries: list[dict]) -> dict:
                 "hint": {
                     "type": "plain_text",
                     "text": "Leave empty if the folder name already says "
-                    "BPH or CAO.",
+                    "BPH, CAO or FLR.",
                 },
                 "element": cat_element,
+            }
+        )
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": f"action_{i}",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Action (Experiments only)"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Required to rename a folder in the Experiments "
+                    "directory (e.g. segmentation).",
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "action",
+                    "placeholder": {"type": "plain_text", "text": "e.g. segmentation"},
+                },
+            }
+        )
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": f"scan_{i}",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "# scans (Scans only)"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Required to rename a folder in the Scans directory.",
+                },
+                "element": {
+                    "type": "number_input",
+                    "action_id": "count",
+                    "is_decimal_allowed": False,
+                    "min_value": "1",
+                },
             }
         )
     return {
@@ -332,4 +536,120 @@ def associate_legacy_view(meta: dict, legacy_entries: list[dict]) -> dict:
         "submit": {"type": "plain_text", "text": "Create"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
+    }
+
+
+def subexperiment_modal_view(meta: dict, prefill_link: str = "") -> dict:
+    """The `subexperiment` modal for /experiment subexperiment: parent link +
+    optional codename + optional date + required action + category + placement.
+
+    The child always uses the action name format; `placement` decides where the
+    folder physically lives (nested in the parent, or top-level in either
+    directory). The category must match the parent's (validated on submit)."""
+    link_element = {
+        "type": "plain_text_input",
+        "action_id": "link_input",
+        "placeholder": {
+            "type": "plain_text",
+            "text": "https://…box.com/folder/123456789",
+        },
+    }
+    if BOX_FOLDER_LINK_RE.search(prefill_link):
+        link_element["initial_value"] = prefill_link
+    placement_options = [
+        {
+            "text": {"type": "plain_text", "text": "Nested inside the parent's folder"},
+            "value": "nested",
+        },
+        {
+            "text": {"type": "plain_text", "text": "Top level of Experiments"},
+            "value": "experiments",
+        },
+        {
+            "text": {"type": "plain_text", "text": "Top level of Scans"},
+            "value": "scans",
+        },
+    ]
+    return {
+        "type": "modal",
+        "callback_id": "subexperiment",
+        "private_metadata": json.dumps(meta),
+        "title": {"type": "plain_text", "text": "New sub-experiment"},
+        "submit": {"type": "plain_text", "text": "Create"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "parent_link",
+                "label": {"type": "plain_text", "text": "Parent experiment link"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Box folder link to the experiment this runs under.",
+                },
+                "element": link_element,
+            },
+            _codename_block(),
+            {
+                "type": "input",
+                "block_id": "date",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Experiment date"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Can differ from the parent (e.g. a run done later). "
+                    "Leave empty for today.",
+                },
+                "element": {"type": "datepicker", "action_id": "date_input"},
+            },
+            {
+                "type": "input",
+                "block_id": "action",
+                "label": {"type": "plain_text", "text": "Action"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Required. Goes into the name as …-CATEGORY-action-user. "
+                    "The category is inherited from the parent.",
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "action_input",
+                    "placeholder": {"type": "plain_text", "text": "e.g. segmentation"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "placement",
+                "label": {"type": "plain_text", "text": "Where to create the folder"},
+                "element": {
+                    "type": "radio_buttons",
+                    "action_id": "placement_input",
+                    "initial_option": placement_options[0],
+                    "options": placement_options,
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "index",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Index this sub-experiment"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Only affects a nested sub-experiment; top-level ones "
+                    "are always indexed.",
+                },
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "index_toggle",
+                    "options": [
+                        {
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Add it to the index CSV",
+                            },
+                            "value": "yes",
+                        }
+                    ],
+                },
+            },
+        ],
     }

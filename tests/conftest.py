@@ -6,7 +6,28 @@ These helpers capture the former and make it easy to stub the latter, so the
 whole app can be exercised without real tokens or network access.
 """
 
+import os
+
 import pytest
+
+from core.box import box_client
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_box_env(request, monkeypatch):
+    """Keep unit tests off the real Box API.
+
+    Importing main.py (done by the wiring tests) runs load_dotenv(), which
+    loads a developer's real BOX_* credentials into the process env. Without
+    this, any test that doesn't fully stub Box would build a real client and
+    hit the network (slow, and dependent on a live token). Strip BOX_* and drop
+    any cached client so the crawl/index paths fail fast with
+    BoxNotConfiguredError instead. Live tests opt out — they need real creds."""
+    if request.node.get_closest_marker("box_live"):
+        return
+    for key in [k for k in os.environ if k.startswith("BOX_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(box_client, "_client", None, raising=False)
 
 
 def pytest_addoption(parser):
